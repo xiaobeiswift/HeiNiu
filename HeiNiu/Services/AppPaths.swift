@@ -11,7 +11,7 @@ import Foundation
 /// `~/Library/Application Support/HeiNiu/`
 ///
 /// - Important: API Key **不**存放于此目录，而在钥匙串中。
-/// - SeeAlso: ``KeychainHelper``, ``DataStorage``
+/// - SeeAlso: ``KeychainHelper``, <doc:DataStorage>
 enum AppPaths {
     /// Application Support 下的应用根目录。
     static var applicationSupportRoot: URL {

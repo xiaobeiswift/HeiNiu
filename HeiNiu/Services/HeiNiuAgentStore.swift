@@ -174,7 +174,7 @@ final class HeiNiuAgentStore {
             sortOrder: nextOrder
         )
         agents.append(agent)
-        AppPaths.ensureKnowledgeDirectory(for: agent.id)
+        _ = AppPaths.ensureKnowledgeDirectory(for: agent.id)
         saveAgents()
         return agent
     }
@@ -722,9 +722,9 @@ final class HeiNiuAgentStore {
         }
         updateConversation(conversation)
 
-        // system = 人设 + 知识库
+        // system =（预置隐藏前缀 +）人设 + 知识库
         var systemParts: [String] = []
-        let instructions = agent.instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        let instructions = agent.effectiveSystemInstructions
         if !instructions.isEmpty {
             systemParts.append(instructions)
         }
@@ -765,16 +765,170 @@ final class HeiNiuAgentStore {
         llmMessages.append(LLMChatMessage(role: .user, content: modelText.isEmpty ? bubble : modelText))
 
         let client = LLMClientFactory.make(for: provider)
-        let reply = try await client.complete(
-            messages: llmMessages,
-            model: model,
-            temperature: agent.temperature,
-            apiKey: apiKey
+
+        // 先插入空助手气泡，流式增量写入 content / reasoning
+        let assistantID = UUID()
+        guard var preparing = self.conversation(id: conversationID) else { return }
+        preparing.messages.append(
+            ChatTurn(id: assistantID, role: .assistant, content: "", reasoning: nil)
+        )
+        updateConversation(preparing)
+
+        var contentBuffer = LLMStreamTextBuffer()
+        var reasoningBuffer = LLMStreamTextBuffer()
+        var lastPersist = Date.distantPast
+
+        do {
+            for try await event in client.stream(
+                messages: llmMessages,
+                model: model,
+                temperature: agent.temperature,
+                reasoningEffort: agent.reasoningEffort,
+                apiKey: apiKey
+            ) {
+                switch event {
+                case .reasoningDelta(let delta):
+                    _ = reasoningBuffer.absorb(delta)
+                case .contentDelta(let delta):
+                    _ = contentBuffer.absorb(delta)
+                }
+
+                // 节流 UI 刷新：过密会导致左右气泡切换时滚动卡顿
+                let now = Date()
+                if now.timeIntervalSince(lastPersist) >= 0.22 {
+                    lastPersist = now
+                    applyStreamingAssistant(
+                        conversationID: conversationID,
+                        messageID: assistantID,
+                        content: contentBuffer.text,
+                        reasoning: reasoningBuffer.text
+                    )
+                }
+            }
+        } catch {
+            // 已有部分内容则保留；完全空则移除占位气泡再抛出
+            if contentBuffer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               reasoningBuffer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                removeMessage(conversationID: conversationID, messageID: assistantID)
+            } else {
+                finalizeStreamingAssistant(
+                    conversationID: conversationID,
+                    messageID: assistantID,
+                    content: contentBuffer.text,
+                    reasoning: reasoningBuffer.text
+                )
+            }
+            throw error
+        }
+
+        finalizeStreamingAssistant(
+            conversationID: conversationID,
+            messageID: assistantID,
+            content: contentBuffer.text,
+            reasoning: reasoningBuffer.text
         )
 
-        guard var latest = self.conversation(id: conversationID) else { return }
-        latest.messages.append(ChatTurn(role: .assistant, content: reply))
-        updateConversation(latest)
+        // 完全空响应
+        if contentBuffer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           reasoningBuffer.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            removeMessage(conversationID: conversationID, messageID: assistantID)
+            throw LLMError.emptyResponse
+        }
+    }
+
+    /// 流式过程中更新助手气泡（不强制改 updatedAt 过频，由调用方节流）。
+    private func applyStreamingAssistant(
+        conversationID: UUID,
+        messageID: UUID,
+        content: String,
+        reasoning: String
+    ) {
+        guard var conversation = conversation(id: conversationID),
+              let index = conversation.messages.firstIndex(where: { $0.id == messageID })
+        else { return }
+
+        let split = LLMReasoningExtractor.split(
+            content: content,
+            reasoning: reasoning.isEmpty ? nil : reasoning
+        )
+        conversation.messages[index].content = split.content
+        // 流式中也做轻量清洗，避免界面闪出复读垃圾
+        conversation.messages[index].reasoning = Self.usableReasoning(
+            split.reasoning,
+            content: split.content,
+            recentUserText: conversation.messages.last(where: { $0.role == .user })?.content
+        )
+        // 流式中不每次 save，避免磁盘抖动；仅改内存
+        if let convIndex = conversations.firstIndex(where: { $0.id == conversationID }) {
+            conversations[convIndex] = conversation
+        }
+    }
+
+    /// 流结束：拆分 <think>、规范化并持久化。
+    private func finalizeStreamingAssistant(
+        conversationID: UUID,
+        messageID: UUID,
+        content: String,
+        reasoning: String
+    ) {
+        guard var conversation = conversation(id: conversationID),
+              let index = conversation.messages.firstIndex(where: { $0.id == messageID })
+        else { return }
+
+        let split = LLMReasoningExtractor.split(
+            content: content,
+            reasoning: reasoning.isEmpty ? nil : reasoning
+        )
+        // 仅有思考无正文时，正文留空、思考仍展示（避免把思考当答案）
+        conversation.messages[index].content = split.content
+        conversation.messages[index].reasoning = Self.usableReasoning(
+            split.reasoning,
+            content: split.content,
+            recentUserText: conversation.messages.last(where: { $0.role == .user })?.content
+        )
+        updateConversation(conversation)
+    }
+
+    /// 过滤无价值「思考」：复读用户话、与正文相同、过短噪声。
+    private static func usableReasoning(
+        _ reasoning: String?,
+        content: String,
+        recentUserText: String?
+    ) -> String? {
+        guard let text = LLMReasoningExtractor.sanitizeReasoning(reasoning) else { return nil }
+
+        if LLMReasoningExtractor.looksLikeUserEcho(text, userText: recentUserText) {
+            return nil
+        }
+
+        let normalizedReasoning = Self.compactText(text)
+        let normalizedContent = Self.compactText(content)
+        if !normalizedContent.isEmpty, normalizedReasoning == normalizedContent {
+            return nil
+        }
+        // 思考几乎就是正文的前缀/副本
+        if !normalizedContent.isEmpty,
+           normalizedReasoning.count >= 20,
+           normalizedContent.hasPrefix(normalizedReasoning) || normalizedReasoning.hasPrefix(normalizedContent) {
+            return nil
+        }
+        // 太短且没有实质结构，不当作思考展示
+        if text.count < 12 { return nil }
+        return text
+    }
+
+    private static func compactText(_ s: String) -> String {
+        s.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined()
+    }
+
+    /// 移除指定消息（流式失败且无内容时清掉占位气泡）。
+    private func removeMessage(conversationID: UUID, messageID: UUID) {
+        guard var conversation = conversation(id: conversationID) else { return }
+        conversation.messages.removeAll { $0.id == messageID }
+        updateConversation(conversation)
     }
 
     /// 估算当前输入相关的上下文占用（字符近似）。
@@ -794,13 +948,14 @@ final class HeiNiuAgentStore {
     ) -> ContextUsage {
         let activeSkills = skills.filter { activeSkillIDs.contains($0.id) }
         return ContextEstimator.estimate(
-            systemPrompt: agent.instructions,
+            systemPrompt: agent.effectiveSystemInstructions,
             knowledge: enabledKnowledge(for: agent.id),
             activeSkills: activeSkills,
             messages: conversation?.messages ?? [],
             attachments: attachments,
             insertedSessions: insertedSessionTexts,
-            draft: draft
+            draft: draft,
+            limit: agent.contextCharacterLimit
         )
     }
 

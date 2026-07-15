@@ -458,7 +458,7 @@ final class SettingsStore {
     /// }
     /// ```
     ///
-    /// - SeeAlso: ``testConnection(for:)-8kz2q``
+    /// - SeeAlso: ``testConnection(for:)-(ImageProvider)``
     ///
     func fetchModels(for provider: LLMProvider) async -> FetchModelsResult {
         let key = apiKey(for: provider.id)

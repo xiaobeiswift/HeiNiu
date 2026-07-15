@@ -56,6 +56,11 @@ struct HeiNiuHomeView: View {
             if selectedAgentID == nil {
                 selectedAgentID = store.sortedAgents.first?.id
             }
+            // 打开工作台时回到该黑妞最近会话，不要每次新建
+            restoreSelectedConversationIfNeeded()
+        }
+        .onChange(of: selectedAgentID) { _, _ in
+            restoreSelectedConversationIfNeeded(force: true)
         }
         .sheet(item: $editingAgent) { agent in
             HeiNiuAgentEditorView(agent: agent) { updated in
@@ -131,7 +136,6 @@ struct HeiNiuHomeView: View {
                                 providerName: settings.provider(id: agent.providerID)?.name,
                                 onSelect: {
                                     selectedAgentID = agent.id
-                                    selectedConversationID = store.conversations(for: agent.id).first?.id
                                 },
                                 onEdit: {
                                     editingAgent = agent
@@ -139,7 +143,7 @@ struct HeiNiuHomeView: View {
                                 onDuplicate: {
                                     if let copy = store.duplicateAgent(id: agent.id) {
                                         selectedAgentID = copy.id
-                                        selectedConversationID = nil
+                                        // onChange(selectedAgentID) 会恢复会话；新副本通常无历史
                                     }
                                 },
                                 onDelete: {
@@ -163,6 +167,24 @@ struct HeiNiuHomeView: View {
         selectedAgentID = agent.id
         selectedConversationID = nil
         editingAgent = agent
+    }
+
+    /// 为当前选中黑妞恢复最近会话（优先有消息的）。
+    private func restoreSelectedConversationIfNeeded(force: Bool = false) {
+        guard let agentID = selectedAgentID ?? store.sortedAgents.first?.id else {
+            selectedConversationID = nil
+            return
+        }
+
+        if !force,
+           let selectedConversationID,
+           let existing = store.conversation(id: selectedConversationID),
+           existing.agentID == agentID {
+            return
+        }
+
+        let list = store.conversations(for: agentID)
+        selectedConversationID = list.first(where: { !$0.messages.isEmpty })?.id ?? list.first?.id
     }
 }
 

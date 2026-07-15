@@ -49,6 +49,13 @@ struct HeiNiuAgent: Identifiable, Codable, Hashable {
     var model: String
     /// 采样温度。
     var temperature: Double
+    /// 思考等级（推理强度）；`none` 时不向 API 发送该字段。
+    var reasoningEffort: ReasoningEffort
+    /// 上下文容量上限（字符近似）。
+    ///
+    /// 仅用于 ``ContextUsageBar`` 占用估算与提示；不代表 API 实际 token 窗口。
+    /// 常见量级：20 万 ≈ 旧默认；100 万 / 200 万对应号称长上下文的模型。
+    var contextCharacterLimit: Int
     /// SF Symbol 图标名。
     var iconSymbol: String
     /// 强调色相（0...1）。
@@ -84,6 +91,12 @@ struct HeiNiuAgent: Identifiable, Codable, Hashable {
 
     /// defaultTemperature。
     static let defaultTemperature: Double = 0.8
+    /// 默认上下文容量（字符）；与 ``ContextEstimator/defaultLimit`` 对齐。
+    static let defaultContextCharacterLimit: Int = ContextEstimator.defaultLimit
+    /// 编辑页可选的常用上下文容量（字符）。
+    static let contextLimitPresets: [Int] = [
+        128_000, 200_000, 256_000, 500_000, 1_000_000, 2_000_000,
+    ]
     static let iconChoices = [
         "sparkles", "film.stack", "pencil.and.outline", "person.wave.2",
         "lightbulb", "text.bubble", "star.circle", "theatermasks",
@@ -101,6 +114,8 @@ struct HeiNiuAgent: Identifiable, Codable, Hashable {
         providerID: UUID? = nil,
         model: String = "",
         temperature: Double = HeiNiuAgent.defaultTemperature,
+        reasoningEffort: ReasoningEffort = .none,
+        contextCharacterLimit: Int = HeiNiuAgent.defaultContextCharacterLimit,
         iconSymbol: String = "sparkles",
         accentHue: Double = 0.08,
         conversationStarters: [String] = [],
@@ -119,6 +134,8 @@ struct HeiNiuAgent: Identifiable, Codable, Hashable {
         self.providerID = providerID
         self.model = model
         self.temperature = temperature
+        self.reasoningEffort = reasoningEffort
+        self.contextCharacterLimit = max(1_000, contextCharacterLimit)
         self.iconSymbol = iconSymbol
         self.accentHue = accentHue
         self.conversationStarters = conversationStarters
@@ -136,6 +153,88 @@ struct HeiNiuAgent: Identifiable, Codable, Hashable {
         Color(hue: accentHue, saturation: 0.72, brightness: 0.92)
     }
 
+    /// 实际发给模型的系统指令。
+    ///
+    /// 当黑妞开启思考、且当前模型**没有**原生思考输出时，在最前注入隐藏前缀，
+    /// 让模型用中文「思考过程」格式写进正文，便于 UI 折叠。
+    /// 关闭思考、或模型本身就会吐 reasoning 时，不加这段。
+    ///
+    /// 编辑页只展示可改的 ``instructions``；隐藏前缀不入库、不可改。
+    var effectiveSystemInstructions: String {
+        let body = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard shouldInjectThinkingFormatPrefix else { return body }
+        let prefix = Self.thinkingFormatInstructionPrefix
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.isEmpty { return prefix }
+        if body.hasPrefix(prefix) { return body }
+        return prefix + "\n\n" + body
+    }
+
+    /// 是否注入「中文思考过程」隐藏前缀。
+    ///
+    /// 条件：
+    /// 1. 思考等级不是 ``ReasoningEffort/none``
+    /// 2. 当前 ``model`` **不**具备原生思考/reasoning 输出
+    ///
+    /// 与是否预置黑妞无关。
+    var shouldInjectThinkingFormatPrefix: Bool {
+        reasoningEffort != .none && !Self.modelHasNativeReasoningOutput(model)
+    }
+
+    /// 判断模型是否自带思考过程输出（有 API reasoning / thinking 字段或内置链）。
+    ///
+    /// 这类模型开思考时只传 `reasoning_effort` / thinking budget 即可，
+    /// 不必再靠提示词演一段「思考过程」。
+    ///
+    /// 启发式匹配模型 ID；未知模型默认视为**无**原生思考输出（可走提示词格式）。
+    static func modelHasNativeReasoningOutput(_ modelID: String) -> Bool {
+        let m = modelID
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard !m.isEmpty else { return false }
+
+        // OpenAI o 系列（避免误伤 gpt-4o：要求 o1/o3/o4 作为独立段）
+        if m.range(of: #"(^|[^a-z0-9])o[1-4]([-_.]|$)"#, options: .regularExpression) != nil {
+            return true
+        }
+        if m.contains("gpt-5") || m.contains("gpt5") { return true }
+
+        // 明确带原生思考能力的常见命名
+        let markers = [
+            "deepseek-r1", "deepseek-reasoner",
+            "qwq", "qwen-qwq", "qwen3",
+            "claude-3-7", "claude-4", "claude-opus-4", "claude-sonnet-4",
+            "gemini-2.5", "gemini-3",
+            "kimi-k1", "k1.5", "kimi-thinking",
+            "doubao-thinking", "doubao-seed-1.6-thinking",
+            "minimax-m1", "glm-z1",
+            "reasoner", "reasoning", "thinking",
+            "-r1", "r1-",
+        ]
+        return markers.contains { m.contains($0) }
+    }
+
+    /// 隐藏系统前缀：在「开思考但模型无原生思考输出」时，用中文格式写思考过程。
+    ///
+    /// 仅当 ``shouldInjectThinkingFormatPrefix`` 为真时附加。
+    ///
+    /// - Important: 不写入 `agents.json`，也不在编辑页展示。
+    static let thinkingFormatInstructionPrefix = """
+    ## 输出格式（系统强制，优先级最高）
+    - 每次回答必须先用中文写「思考过程」，再写最终正文。
+    - 严格使用下面结构（含分隔线），不要省略标题，不要复读用户原话：
+
+    **思考过程：**
+    （用中文写推理：目标、结构取舍、风险与约束；简洁可执行）
+
+    ---
+
+    （这里写最终成稿/答案）
+
+    - 思考与正文必须分开；禁止用英文 “The user said…” / “用户要求：” 复读。
+    - 若任务只需简短确认，思考过程可极短，但仍保留上述标题与分隔线。
+    """
+
     /// 初始化方法
     ///
     /// 初始化方法。
@@ -148,6 +247,9 @@ struct HeiNiuAgent: Identifiable, Codable, Hashable {
         providerID = try container.decodeIfPresent(UUID.self, forKey: .providerID)
         model = try container.decodeIfPresent(String.self, forKey: .model) ?? ""
         temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? Self.defaultTemperature
+        reasoningEffort = try container.decodeIfPresent(ReasoningEffort.self, forKey: .reasoningEffort) ?? .none
+        let decodedLimit = try container.decodeIfPresent(Int.self, forKey: .contextCharacterLimit) ?? Self.defaultContextCharacterLimit
+        contextCharacterLimit = max(1_000, decodedLimit)
         iconSymbol = try container.decodeIfPresent(String.self, forKey: .iconSymbol) ?? "sparkles"
         accentHue = try container.decodeIfPresent(Double.self, forKey: .accentHue) ?? 0.08
         conversationStarters = try container.decodeIfPresent([String].self, forKey: .conversationStarters) ?? []
@@ -165,22 +267,85 @@ struct HeiNiuAgent: Identifiable, Codable, Hashable {
     /// `CodingKeys` 类型定义。
     private enum CodingKeys: String, CodingKey {
         /// 唯一标识符。
-        case id, name, subtitle, instructions, providerID, model, temperature
+        case id, name, subtitle, instructions, providerID, model, temperature, reasoningEffort, contextCharacterLimit
         /// SF Symbol 图标名。
         case iconSymbol, accentHue, conversationStarters, enabledSkillIDs, mcpMode, enabledMCPServerIDs
         /// 是否为系统预置。
         case isBuiltIn, sortOrder, createdAt, updatedAt
     }
+
+    /// 上下文容量的界面文案（如 `20万`、`100万`）。
+    var contextLimitDisplayText: String {
+        Self.formatContextLimit(contextCharacterLimit)
+    }
+
+    /// 把字符上限格式化为中文短文案。
+    static func formatContextLimit(_ n: Int) -> String {
+        if n >= 10_000 {
+            let wan = Double(n) / 10_000
+            if wan == floor(wan) {
+                return "\(Int(wan))万"
+            }
+            return String(format: "%.1f万", wan)
+        }
+        return "\(n)"
+    }
+}
+
+/// 模型思考 / 推理强度。
+///
+/// 对支持 reasoning 的模型（如部分 OpenAI Responses / o 系列兼容网关）生效；
+/// 选 ``none`` 时不向请求体写入相关字段。
+enum ReasoningEffort: String, Codable, CaseIterable, Identifiable, Hashable {
+    /// 不发送思考等级（默认）。
+    case none
+    /// 低强度，更快更省。
+    case low
+    /// 中等。
+    case medium
+    /// 高强度，更慢更细。
+    case high
+
+    var id: String { rawValue }
+
+    /// 界面文案。
+    var displayName: String {
+        switch self {
+        case .none: "默认"
+        case .low: "低"
+        case .medium: "中"
+        case .high: "高"
+        }
+    }
+
+    /// 简短说明。
+    var subtitle: String {
+        switch self {
+        case .none: "不指定思考等级"
+        case .low: "更快，适合简单任务"
+        case .medium: "平衡速度与质量"
+        case .high: "更深推理，更慢"
+        }
+    }
+
+    /// 写入 API 的 effort 字符串；`none` 为 `nil`。
+    var apiValue: String? {
+        switch self {
+        case .none: nil
+        case .low: "low"
+        case .medium: "medium"
+        case .high: "high"
+        }
+    }
 }
 
 /// 黑妞级 MCP 策略。
 ///
-/// - ``disabled``：不使用 MCP  
-/// - ``automatic``：使用全局已启用服务器  
-/// - ``manual``：仅 ``enabledMCPServerIDs``  
+/// - ``disabled``：不使用 MCP
+/// - ``automatic``：使用全局已启用服务器
+/// - ``manual``：仅 ``enabledMCPServerIDs``
 ///
 /// UI 上以三张卡片呈现（禁用 / 自动 / 手动）。
-///
 enum AgentMCPMode: String, Codable, CaseIterable, Identifiable, Hashable {
     /// disabled。
     case disabled
@@ -213,6 +378,8 @@ enum AgentMCPMode: String, Codable, CaseIterable, Identifiable, Hashable {
 
 /// 单条聊天消息。
 ///
+/// 助手消息可附带 ``reasoning``（思考过程），与最终 ``content`` 分开存、分开展示。
+///
 /// - SeeAlso: ``HeiNiuConversation``
 ///
 struct ChatTurn: Identifiable, Codable, Hashable {
@@ -232,19 +399,71 @@ struct ChatTurn: Identifiable, Codable, Hashable {
     var id: UUID
     /// 消息角色。
     var role: Role
-    /// 消息正文。
+    /// 消息正文（最终回答）。
     var content: String
+    /// 模型思考过程（可选；仅助手消息有意义）。
+    ///
+    /// 来自 API 的 `reasoning` / `reasoning_content` / `thinking` 等字段，
+    /// 或从正文中的 `<think>…</think>` 标签拆出。
+    var reasoning: String?
     /// 创建时间。
     var createdAt: Date
 
     /// 初始化方法
     ///
     /// 初始化方法。
-    init(id: UUID = UUID(), role: Role, content: String, createdAt: Date = Date()) {
+    init(
+        id: UUID = UUID(),
+        role: Role,
+        content: String,
+        reasoning: String? = nil,
+        createdAt: Date = Date()
+    ) {
         self.id = id
         self.role = role
         self.content = content
+        self.reasoning = Self.normalizedOptionalText(reasoning)
         self.createdAt = createdAt
+    }
+
+    /// 容错解码：旧会话无 `reasoning` 字段时为 `nil`。
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        role = try container.decodeIfPresent(Role.self, forKey: .role) ?? .assistant
+        content = try container.decodeIfPresent(String.self, forKey: .content) ?? ""
+        let rawReasoning: String? = {
+            if let s = try? container.decodeIfPresent(String.self, forKey: .reasoning) { return s }
+            if let s = try? container.decodeIfPresent(String.self, forKey: .thinking) { return s }
+            if let s = try? container.decodeIfPresent(String.self, forKey: .reasoningContent) { return s }
+            return nil
+        }()
+        reasoning = Self.normalizedOptionalText(rawReasoning)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(role, forKey: .role)
+        try container.encode(content, forKey: .content)
+        try container.encodeIfPresent(reasoning, forKey: .reasoning)
+        try container.encode(createdAt, forKey: .createdAt)
+    }
+
+    /// 是否有可展示的思考过程。
+    var hasReasoning: Bool {
+        !(reasoning?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, role, content, reasoning, thinking, reasoningContent, createdAt
+    }
+
+    private static func normalizedOptionalText(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 }
 

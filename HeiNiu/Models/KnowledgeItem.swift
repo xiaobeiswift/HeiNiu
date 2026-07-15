@@ -646,7 +646,8 @@ struct ContextUsage: Hashable {
 /// 中文场景下比 token 更直观；结果供 ``ContextUsageBar`` 展示。
 ///
 enum ContextEstimator {
-    /// 粗略按字符估算（中文场景比 token 更直观）；默认窗口可配置
+    /// 粗略按字符估算（中文场景比 token 更直观）；默认约 20 万字符。
+    /// 实际上限按黑妞 ``HeiNiuAgent/contextCharacterLimit`` 配置。
     static let defaultLimit = 200_000
 
     /// estimate

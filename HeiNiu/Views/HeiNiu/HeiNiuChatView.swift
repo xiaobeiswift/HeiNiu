@@ -33,6 +33,8 @@ struct HeiNiuChatView: View {
     /// 全界面拖放高亮
     /// 输入框触发的面板类型
     @State private var isDropTargeted = false
+    /// 流式自动滚底节流，避免每个 token 都带动画重排
+    @State private var lastAutoScrollAt: Date = .distantPast
     @FocusState private var inputFocused: Bool
     private enum PaletteKind: Equatable {
         /// 命令名（不含前缀）。
@@ -251,10 +253,9 @@ struct HeiNiuChatView: View {
                     .allowsHitTesting(false)
             }
         }
-        .onAppear { ensureConversation() }
+        .onAppear { restoreConversationIfNeeded() }
         .onChange(of: agent.id) { _, _ in
-            conversationID = store.conversations(for: agent.id).first?.id
-            ensureConversation()
+            restoreConversationIfNeeded(force: true)
             resetComposer()
         }
         .onChange(of: paletteRows.map(\.id)) { _, _ in
@@ -265,11 +266,6 @@ struct HeiNiuChatView: View {
         }
         .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
-        }
-        .popover(isPresented: $showContextDetail, arrowEdge: .top) {
-            ContextUsageBar(usage: contextUsage, compact: false)
-                .frame(width: 300)
-                .padding(8)
         }
     }
 
@@ -307,55 +303,46 @@ struct HeiNiuChatView: View {
 
     /// header。
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(agent.accentColor.opacity(0.18))
-                        .frame(width: 44, height: 44)
-                    Image(systemName: agent.iconSymbol)
-                        .font(.title3)
-                        .foregroundStyle(agent.accentColor)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(agent.name)
-                        .font(.headline)
-                    Text(statusLine)
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.textTertiary)
-                }
-
-                Spacer()
-
-                let kbCount = store.knowledge(for: agent.id).count
-                if kbCount > 0 {
-                    StatusBadge(text: "知识库 \(kbCount)", style: .neutral, systemImage: "books.vertical")
-                }
-
-                Button("编辑") { onEdit() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(AppTheme.accent)
-
-                Button {
-                    let c = store.startConversation(agentID: agent.id)
-                    conversationID = c.id
-                    resetComposer()
-                } label: {
-                    Label("新对话", systemImage: "square.and.pencil")
-                        .font(.subheadline.weight(.medium))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(AppTheme.bgElevated, in: Capsule())
-                        .overlay(Capsule().stroke(AppTheme.stroke, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
+        HStack(spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(agent.accentColor.opacity(0.18))
+                    .frame(width: 44, height: 44)
+                Image(systemName: agent.iconSymbol)
+                    .font(.title3)
+                    .foregroundStyle(agent.accentColor)
             }
 
+            VStack(alignment: .leading, spacing: 2) {
+                Text(agent.name)
+                    .font(.headline)
+                Text(statusLine)
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+
+            Spacer()
+
+            let kbCount = store.knowledge(for: agent.id).count
+            if kbCount > 0 {
+                StatusBadge(text: "知识库 \(kbCount)", style: .neutral, systemImage: "books.vertical")
+            }
+
+            Button("编辑") { onEdit() }
+                .buttonStyle(.plain)
+                .foregroundStyle(AppTheme.accent)
+
             Button {
-                showContextDetail.toggle()
+                let c = store.startConversation(agentID: agent.id)
+                conversationID = c.id
+                resetComposer()
             } label: {
-                ContextUsageBar(usage: contextUsage, compact: true)
+                Label("新对话", systemImage: "square.and.pencil")
+                    .font(.subheadline.weight(.medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(AppTheme.bgElevated, in: Capsule())
+                    .overlay(Capsule().stroke(AppTheme.stroke, lineWidth: 1))
             }
             .buttonStyle(.plain)
         }
@@ -367,7 +354,16 @@ struct HeiNiuChatView: View {
     private var statusLine: String {
         let provider = settings.provider(id: agent.providerID)?.name ?? "未绑定服务商"
         let model = agent.model.isEmpty ? "未选模型" : agent.model
+        let effort = agent.reasoningEffort == .none ? nil : agent.reasoningEffort.displayName
+        if let effort {
+            return "\(provider) · \(model) · 思考\(effort)"
+        }
         return "\(provider) · \(model)"
+    }
+
+    /// 输入区右侧展示的模型名（仅模型，不带服务商）。
+    private var composerModelLabel: String {
+        agent.model.isEmpty ? "未选模型" : agent.model
     }
 
     // MARK: - Chat
@@ -375,32 +371,21 @@ struct HeiNiuChatView: View {
     /// chatColumn。
     private var chatColumn: some View {
         VStack(spacing: 0) {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 14) {
-                        if conversation?.messages.isEmpty != false {
-                            welcomeBlock
-                        }
-                        ForEach(conversation?.messages ?? []) { message in
-                            MessageBubble(message: message, accent: agent.accentColor)
-                                .id(message.id)
-                        }
-                        if isSending {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text("黑妞思考中…")
-                                    .font(.callout)
-                                    .foregroundStyle(AppTheme.textTertiary)
-                            }
-                            .padding(.leading, 8)
-                            .id("typing")
-                        }
-                    }
-                    .padding(20)
-                }
-                .onChange(of: conversation?.messages.count) { _, _ in scrollToBottom(proxy) }
-                .onChange(of: isSending) { _, _ in scrollToBottom(proxy) }
-            }
+            // 消息列表独立：输入/上下文估算变化时不重绘整段剧本
+            ChatTranscriptView(
+                messages: conversation?.messages ?? [],
+                isSending: isSending,
+                accent: agent.accentColor,
+                conversationID: conversationID,
+                emptySubtitle: agent.subtitle,
+                starters: agent.conversationStarters,
+                onPickStarter: { starter in
+                    input = starter
+                    Task { await send() }
+                },
+                lastAutoScrollAt: $lastAutoScrollAt
+            )
+            .equatable()
 
             if let errorMessage {
                 Text(errorMessage)
@@ -413,48 +398,6 @@ struct HeiNiuChatView: View {
 
             composer
         }
-    }
-
-    /// welcomeBlock。
-    private var welcomeBlock: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(agent.subtitle.isEmpty ? "开始和她聊聊" : agent.subtitle)
-                .font(.title3.weight(.semibold))
-            Text("附件用回形针；/ 命令 · @ 提及 · $ 技能 · # 插入会话。知识库在「编辑」中配置。")
-                .font(.callout)
-                .foregroundStyle(AppTheme.textSecondary)
-
-            if !agent.conversationStarters.isEmpty {
-                FlowLayout(spacing: 8) {
-                    ForEach(agent.conversationStarters, id: \.self) { starter in
-                        Button {
-                            input = starter
-                            Task { await send() }
-                        } label: {
-                            Text(starter)
-                                .font(.callout)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .foregroundStyle(agent.accentColor)
-                                .background(agent.accentColor.opacity(0.12), in: Capsule())
-                                .overlay(Capsule().stroke(agent.accentColor.opacity(0.28), lineWidth: 1))
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isSending)
-                    }
-                }
-            }
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(AppTheme.bgCard)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(AppTheme.stroke, lineWidth: 1)
-        )
     }
 
     // MARK: - Composer
@@ -512,12 +455,64 @@ struct HeiNiuChatView: View {
                         .font(.caption2)
                         .foregroundStyle(AppTheme.textTertiary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
 
-                    Spacer(minLength: 8)
+                    Spacer(minLength: 6)
 
-                    Text(contextUsage.headline)
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(contextUsage.ratio > 0.9 ? AppTheme.danger : AppTheme.textTertiary)
+                    // 模型名 + 仅环形容量指示（无百分比/胶囊底，省横向空间）
+                    Text(composerModelLabel)
+                        .font(.caption2)
+                        .foregroundStyle(AppTheme.textTertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 140, alignment: .trailing)
+                        .help(composerModelLabel)
+
+                    Button {
+                        showContextDetail.toggle()
+                    } label: {
+                        ContextUsageBar(usage: contextUsage, compact: true)
+                            .frame(width: 28, height: 28)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("上下文容量 \(contextUsage.percentText)")
+                    .popover(isPresented: $showContextDetail, arrowEdge: .bottom) {
+                        ContextUsageBar(usage: contextUsage, compact: false)
+                            .padding(4)
+                            .presentationCompactAdaptation(.popover)
+                    }
+
+                    // 思考等级：发送键旁边
+                    Menu {
+                        ForEach(ReasoningEffort.allCases) { level in
+                            Button {
+                                setReasoningEffort(level)
+                            } label: {
+                                if agent.reasoningEffort == level {
+                                    Label(level.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(level.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "brain.head.profile")
+                                .font(.caption)
+                            Text(agent.reasoningEffort == .none ? "思考" : "思考·\(agent.reasoningEffort.displayName)")
+                                .font(.caption.weight(.medium))
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                        .foregroundStyle(AppTheme.textSecondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(AppTheme.bgCard.opacity(0.55), in: Capsule())
+                        .overlay(Capsule().stroke(AppTheme.stroke, lineWidth: 1))
+                    }
+                    .menuStyle(.borderlessButton)
+                    .help("思考等级")
 
                     Button {
                         Task { await send() }
@@ -873,8 +868,7 @@ struct HeiNiuChatView: View {
                             Button("删除", role: .destructive) {
                                 store.deleteConversation(id: item.id)
                                 if conversationID == item.id {
-                                    conversationID = store.conversations(for: agent.id).first?.id
-                                    ensureConversation()
+                                    restoreConversationIfNeeded(force: true)
                                 }
                             }
                         }
@@ -898,11 +892,30 @@ struct HeiNiuChatView: View {
         )
     }
 
-    /// ensureConversation
+    /// 恢复当前黑妞的最近会话；不自动新建空对话。
     ///
-    /// 执行 `ensureConversation` 相关逻辑。
+    /// - Parameter force: 为 true 时忽略现有 `conversationID`，重新选最近一条（切角色/删会话后用）。
+    private func restoreConversationIfNeeded(force: Bool = false) {
+        if !force,
+           let conversationID,
+           let existing = store.conversation(id: conversationID),
+           existing.agentID == agent.id {
+            return
+        }
+
+        let list = store.conversations(for: agent.id)
+        // 优先恢复有内容的最近会话，避免反复落到空的「新对话」
+        if let preferred = list.first(where: { !$0.messages.isEmpty }) ?? list.first {
+            conversationID = preferred.id
+        } else {
+            conversationID = nil
+        }
+    }
+
+    /// 发送前保证有会话：先恢复，没有历史再新建。
     private func ensureConversation() {
-        if conversationID == nil || store.conversation(id: conversationID) == nil {
+        restoreConversationIfNeeded()
+        if conversationID == nil {
             let c = store.startConversation(agentID: agent.id)
             conversationID = c.id
         }
@@ -920,20 +933,12 @@ struct HeiNiuChatView: View {
         insertedSnippets = []
     }
 
-    /// scrollToBottom
-    ///
-    /// 执行 `scrollToBottom` 相关逻辑。
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        DispatchQueue.main.async {
-            if isSending {
-                withAnimation { proxy.scrollTo("typing", anchor: .bottom) }
-            } else if let last = conversation?.messages.last {
-                withAnimation { proxy.scrollTo(last.id, anchor: .bottom) }
-            }
-        }
+    /// 更新当前黑妞的思考等级并持久化。
+    private func setReasoningEffort(_ level: ReasoningEffort) {
+        var updated = agent
+        updated.reasoningEffort = level
+        store.updateAgent(updated)
     }
-
-
 
     /// pickFiles
     ///
@@ -1221,39 +1226,424 @@ struct HeiNiuChatView: View {
     }
 }
 
+// MARK: - Transcript
+
+/// 消息滚动区：与输入框/上下文估算隔离，避免父视图状态导致整表重绘。
+private struct ChatTranscriptView: View, Equatable {
+    let messages: [ChatTurn]
+    let isSending: Bool
+    let accent: Color
+    let conversationID: UUID?
+    let emptySubtitle: String
+    let starters: [String]
+    let onPickStarter: (String) -> Void
+    @Binding var lastAutoScrollAt: Date
+
+    static func == (lhs: ChatTranscriptView, rhs: ChatTranscriptView) -> Bool {
+        // 避免对整段剧本做深比较（会拖慢输入框每一次击键）
+        guard lhs.isSending == rhs.isSending,
+              lhs.conversationID == rhs.conversationID,
+              lhs.accent == rhs.accent,
+              lhs.emptySubtitle == rhs.emptySubtitle,
+              lhs.starters == rhs.starters,
+              lhs.messages.count == rhs.messages.count
+        else { return false }
+        // 只比对 id + 长度 + 末条内容指纹
+        if zip(lhs.messages, rhs.messages).contains(where: {
+            $0.id != $1.id
+                || $0.content.count != $1.content.count
+                || ($0.reasoning?.count ?? 0) != ($1.reasoning?.count ?? 0)
+        }) {
+            return false
+        }
+        if let l = lhs.messages.last, let r = rhs.messages.last {
+            return l.content == r.content && l.reasoning == r.reasoning
+        }
+        return true
+    }
+
+    private var streamingFingerprint: Int {
+        guard isSending, let last = messages.last, last.role == .assistant else { return 0 }
+        return (last.content.count + (last.reasoning?.count ?? 0)) / 64
+    }
+
+    private var hasStreamingAssistantBubble: Bool {
+        isSending && messages.last?.role == .assistant
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            messageScroll(proxy: proxy)
+        }
+    }
+
+    @ViewBuilder
+    private func messageScroll(proxy: ScrollViewProxy) -> some View {
+        // 对齐历史实现：ScrollView → LazyVStack → MessageBubble(HStack+Spacer)
+        // 不要 GeometryReader / containerRelativeFrame / 固定行宽，那些会把布局搞崩。
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                if messages.isEmpty {
+                    welcomeBlock
+                }
+                ForEach(messages) { message in
+                    messageRow(message)
+                }
+                if isSending && !hasStreamingAssistantBubble {
+                    typingIndicator
+                }
+                Color.clear
+                    .frame(height: 1)
+                    .id("bottom-anchor")
+            }
+            .padding(20)
+        }
+        .onChange(of: messages.count) { _, _ in
+            scrollToBottom(proxy, animated: true, force: true)
+        }
+        .onChange(of: isSending) { _, sending in
+            scrollToBottom(proxy, animated: !sending, force: true)
+        }
+        .onChange(of: streamingFingerprint) { _, _ in
+            scrollToBottom(proxy, animated: false, force: false)
+        }
+        .onChange(of: conversationID) { _, _ in
+            lastAutoScrollAt = .distantPast
+            scrollToBottom(proxy, animated: false, force: true)
+        }
+        .onAppear {
+            scrollToBottom(proxy, animated: false, force: true)
+        }
+    }
+
+    private func messageRow(_ message: ChatTurn) -> some View {
+        let streaming = isSending
+            && message.role == .assistant
+            && message.id == messages.last?.id
+        return MessageBubble(
+            message: message,
+            accent: accent,
+            isStreaming: streaming
+        )
+        .id(message.id)
+    }
+
+    private var typingIndicator: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("黑妞思考中…")
+                .font(.callout)
+                .foregroundStyle(AppTheme.textTertiary)
+        }
+        .padding(.leading, 8)
+        .id("typing")
+    }
+
+    private var welcomeBlock: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(emptySubtitle.isEmpty ? "开始和她聊聊" : emptySubtitle)
+                .font(.title3.weight(.semibold))
+            Text("附件用回形针；/ 命令 · @ 提及 · $ 技能 · # 插入会话。知识库在「编辑」中配置。")
+                .font(.callout)
+                .foregroundStyle(AppTheme.textSecondary)
+
+            if !starters.isEmpty {
+                FlowLayout(spacing: 8) {
+                    ForEach(starters, id: \.self) { starter in
+                        Button {
+                            onPickStarter(starter)
+                        } label: {
+                            Text(starter)
+                                .font(.callout)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .foregroundStyle(accent)
+                                .background(accent.opacity(0.12), in: Capsule())
+                                .overlay(Capsule().stroke(accent.opacity(0.28), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isSending)
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(AppTheme.bgCard)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(AppTheme.stroke, lineWidth: 1)
+        )
+    }
+
+    private func scrollToBottom(
+        _ proxy: ScrollViewProxy,
+        animated: Bool,
+        force: Bool
+    ) {
+        let now = Date()
+        if !force, now.timeIntervalSince(lastAutoScrollAt) < 0.32 {
+            return
+        }
+        lastAutoScrollAt = now
+        DispatchQueue.main.async {
+            let target: AnyHashable = {
+                if isSending, hasStreamingAssistantBubble, let last = messages.last {
+                    return last.id
+                }
+                if isSending, !hasStreamingAssistantBubble {
+                    return "typing"
+                }
+                if let last = messages.last {
+                    return last.id
+                }
+                return "bottom-anchor"
+            }()
+            if animated {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    proxy.scrollTo(target, anchor: .bottom)
+                }
+            } else {
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    proxy.scrollTo(target, anchor: .bottom)
+                }
+            }
+        }
+    }
+}
+
 /// MessageBubble
 ///
-/// `MessageBubble` 类型定义。
-private struct MessageBubble: View {
+/// 恢复圆角对话气泡样式；长文仍默认折叠，避免再把滚动拖垮。
+private struct MessageBubble: View, Equatable {
     /// message。
     let message: ChatTurn
     /// accent。
     let accent: Color
+    /// 是否处于流式输出中（最后一条助手消息）。
+    var isStreaming: Bool = false
 
-    /// isUser。
+    /// 超过该字符数时默认折叠正文（短剧一轮很容易上万字）。
+    private static let collapseThreshold = 900
+    /// 气泡统一最大宽度：多行正文都在此宽度内换行，避免折叠/展开时「一宽一窄」。
+    private static let bubbleMaxWidth: CGFloat = 520
+
+    @State private var reasoningExpanded = false
+    @State private var bodyExpanded = false
+
+    static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.message.id == rhs.message.id
+            && lhs.message.role == rhs.message.role
+            && lhs.message.content == rhs.message.content
+            && lhs.message.reasoning == rhs.message.reasoning
+            && lhs.isStreaming == rhs.isStreaming
+            && lhs.accent == rhs.accent
+    }
+
     private var isUser: Bool { message.role == .user }
 
-    /// SwiftUI 视图内容。
+    private var shouldOfferCollapse: Bool {
+        !isStreaming && message.content.count >= Self.collapseThreshold
+    }
+
+    /// 长文 / 多行 / 可折叠：用统一宽度，避免「同一组件一宽一窄」。
+    private var usesUniformBubbleWidth: Bool {
+        shouldOfferCollapse
+            || bodyExpanded
+            || isStreaming
+            || message.content.count >= 80
+            || message.content.contains("\n")
+    }
+
+    private var showsFullBody: Bool {
+        isStreaming || bodyExpanded || !shouldOfferCollapse
+    }
+
+    private var displayBody: String {
+        guard !showsFullBody else { return message.content }
+        // 尽量在段落边界截断，观感不像硬切
+        let prefix = String(message.content.prefix(Self.collapseThreshold))
+        if let breakIndex = prefix.lastIndex(where: { $0 == "\n" || $0 == "。" || $0 == "！" || $0 == "？" }) {
+            return String(prefix[...breakIndex]) + "…"
+        }
+        return prefix + "…"
+    }
+
     var body: some View {
-        HStack {
+        // 与 git 历史一致：HStack + 两侧 Spacer 负责左右贴边
+        HStack(alignment: .top, spacing: 0) {
             if isUser { Spacer(minLength: 60) }
 
-            Text(message.content)
-                .font(.body)
-                .foregroundStyle(isUser ? Color.black.opacity(0.85) : AppTheme.textPrimary)
-                .textSelection(.enabled)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-                .background(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(isUser ? accent : AppTheme.bgElevated)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(isUser ? Color.clear : AppTheme.stroke, lineWidth: 1)
-                )
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 8) {
+                if !isUser, message.hasReasoning {
+                    reasoningBlock
+                }
+
+                if !message.content.isEmpty {
+                    contentBubble
+                } else if isStreaming && !isUser {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text(message.hasReasoning ? "正在组织回答…" : "黑妞思考中…")
+                            .font(.callout)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(AppTheme.bgElevated)
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(AppTheme.stroke, lineWidth: 1)
+                    )
+                }
+            }
 
             if !isUser { Spacer(minLength: 60) }
         }
+        .onChange(of: isStreaming) { _, streaming in
+            if streaming {
+                bodyExpanded = true
+            } else if message.content.count >= Self.collapseThreshold {
+                bodyExpanded = false
+            }
+            if !streaming {
+                reasoningExpanded = false
+            }
+        }
+        .onAppear {
+            if isStreaming {
+                bodyExpanded = true
+            }
+        }
     }
+
+    private var contentBubble: some View {
+        // 短消息：完全贴合文字（历史行为）
+        // 长消息：固定 bubbleMaxWidth，折叠/展开同宽
+        Group {
+            if usesUniformBubbleWidth {
+                longContentBubble
+            } else {
+                shortContentBubble
+            }
+        }
+        .contextMenu {
+            Button("复制") { copyToPasteboard(message.content) }
+        }
+    }
+
+    /// 「继续」等短气泡：不要 maxWidth，否则在 HStack 里会被父布局撑开。
+    private var shortContentBubble: some View {
+        Text(displayBody)
+            .font(.body)
+            .foregroundStyle(isUser ? Color.black.opacity(0.85) : AppTheme.textPrimary)
+            .textSelection(.enabled)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isUser ? accent : AppTheme.bgElevated)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(isUser ? Color.clear : AppTheme.stroke, lineWidth: 1)
+            )
+    }
+
+    /// 长剧本：统一宽度，折叠态与展开态一致。
+    private var longContentBubble: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(displayBody)
+                .font(.body)
+                .foregroundStyle(isUser ? Color.black.opacity(0.85) : AppTheme.textPrimary)
+                .multilineTextAlignment(.leading)
+                .textSelection(.enabled)
+
+            if shouldOfferCollapse {
+                Button {
+                    bodyExpanded.toggle()
+                } label: {
+                    Text(bodyExpanded ? "收起" : "展开全文（\(message.content.count) 字）")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(isUser ? Color.black.opacity(0.55) : AppTheme.accent)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .frame(width: Self.bubbleMaxWidth, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isUser ? accent : AppTheme.bgElevated)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isUser ? Color.clear : AppTheme.stroke, lineWidth: 1)
+        )
+    }
+
+    private var reasoningBlock: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                reasoningExpanded.toggle()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "brain.head.profile")
+                        .font(.caption)
+                    Text(isStreaming && message.content.isEmpty ? "思考中" : "思考过程")
+                        .font(.caption.weight(.semibold))
+                    if isStreaming && message.content.isEmpty {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Image(systemName: reasoningExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundStyle(AppTheme.textSecondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if reasoningExpanded {
+                Text(message.reasoning ?? "")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 10)
+                    .contextMenu {
+                        Button("复制思考过程") { copyToPasteboard(message.reasoning ?? "") }
+                    }
+            }
+        }
+        // 折叠：贴合标题；展开：与长正文同宽
+        .frame(
+            width: reasoningExpanded ? Self.bubbleMaxWidth : nil,
+            alignment: .leading
+        )
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(AppTheme.bgCard.opacity(0.9))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(AppTheme.stroke.opacity(0.9), lineWidth: 1)
+        )
+    }
+}
+
+private func copyToPasteboard(_ text: String) {
+    guard !text.isEmpty else { return }
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(text, forType: .string)
 }

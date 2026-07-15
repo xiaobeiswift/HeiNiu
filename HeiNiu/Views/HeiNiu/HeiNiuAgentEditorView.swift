@@ -187,6 +187,63 @@ struct HeiNiuAgentEditorView: View {
                             .tint(AppTheme.accent)
                     }
 
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("思考等级")
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(AppTheme.textSecondary)
+                        Picker("思考等级", selection: $draft.reasoningEffort) {
+                            ForEach(ReasoningEffort.allCases) { level in
+                                Text(level.displayName).tag(level)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        Text(draft.reasoningEffort.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.textTertiary)
+                        Text("对支持 reasoning 的模型生效（如部分 OpenAI Responses / o 系列）；选「默认」则不发送该参数。")
+                            .font(.caption2)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("上下文容量")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(AppTheme.textSecondary)
+                            Spacer()
+                            Text(draft.contextLimitDisplayText)
+                                .font(.callout.monospacedDigit())
+                                .foregroundStyle(AppTheme.accent)
+                        }
+
+                        labeledPicker("预设") {
+                            Picker("上下文容量", selection: contextLimitSelection) {
+                                ForEach(HeiNiuAgent.contextLimitPresets, id: \.self) { limit in
+                                    Text(HeiNiuAgent.formatContextLimit(limit)).tag(Optional(limit))
+                                }
+                                Text("自定义").tag(Optional<Int>.none)
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                        }
+
+                        if !HeiNiuAgent.contextLimitPresets.contains(draft.contextCharacterLimit) {
+                            HStack(spacing: 8) {
+                                TextField("字符数", value: $draft.contextCharacterLimit, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 160)
+                                Text("字符")
+                                    .font(.caption)
+                                    .foregroundStyle(AppTheme.textTertiary)
+                            }
+                        }
+
+                        Text("按字符近似估算占用（中文场景更直观），用于聊天区容量环；不是 API 的真实 token 窗口。百万级模型可调到 100 万 / 200 万。")
+                            .font(.caption2)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    }
+
                     if settings.providers.isEmpty {
                         Text("请先到「配置 → 设置 → 服务商」添加。")
                             .font(.caption)
@@ -584,12 +641,32 @@ struct HeiNiuAgentEditorView: View {
         if cleaned.name.isEmpty { cleaned.name = "未命名黑妞" }
         cleaned.subtitle = cleaned.subtitle.trimmingCharacters(in: .whitespacesAndNewlines)
         cleaned.model = cleaned.model.trimmingCharacters(in: .whitespacesAndNewlines)
+        cleaned.contextCharacterLimit = max(1_000, cleaned.contextCharacterLimit)
         let skillIDs = Set(agentStore.skills.map(\.id))
         cleaned.enabledSkillIDs.removeAll { !skillIDs.contains($0) }
         let mcpIDs = Set(settings.mcpServers.map(\.id))
         cleaned.enabledMCPServerIDs.removeAll { !mcpIDs.contains($0) }
         onSave(cleaned)
         dismiss()
+    }
+
+    /// 上下文容量预设选择：命中预设则绑定具体值，否则进入「自定义」。
+    private var contextLimitSelection: Binding<Int?> {
+        Binding(
+            get: {
+                HeiNiuAgent.contextLimitPresets.contains(draft.contextCharacterLimit)
+                    ? draft.contextCharacterLimit
+                    : nil
+            },
+            set: { newValue in
+                if let newValue {
+                    draft.contextCharacterLimit = newValue
+                } else if HeiNiuAgent.contextLimitPresets.contains(draft.contextCharacterLimit) {
+                    // 从预设切到自定义时给一个可改的起点
+                    draft.contextCharacterLimit = 1_000_000
+                }
+            }
+        )
     }
 }
 
