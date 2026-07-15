@@ -4,9 +4,13 @@
 
 > 当前进度：**设置阶段**已可用。学习、剧本、分镜、资产库等业务模块仍在规划中。
 
+**在线文档（DocC）：**  
+https://xiaobeiswift.github.io/HeiNiu/documentation/heiniu/
+
 ![macOS](https://img.shields.io/badge/macOS-15%2B-black)
 ![SwiftUI](https://img.shields.io/badge/SwiftUI-6-orange)
 ![License](https://img.shields.io/badge/license-MIT-green)
+![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue)
 
 ## 它解决什么问题
 
@@ -160,19 +164,12 @@ HeiNiu/
 
 **Product → Build Documentation**（⌃⇧⌘D）
 
-### 发布到 GitHub Pages
-
-本仓库提供工作流 [`.github/workflows/docs.yml`](.github/workflows/docs.yml)：
-
-1. 打开 GitHub 仓库 **Settings → Pages**
-2. **Build and deployment → Source** 选择 **GitHub Actions**
-3. 推送到 `main`（或手动 **Actions → Documentation → Run workflow**）
-
-发布成功后访问：
+### 在线文档
 
 **https://xiaobeiswift.github.io/HeiNiu/documentation/heiniu/**
 
-> 文档由 CI 构建，不必把庞大的 `docs/` 静态站提交进 Git。
+由 [`.github/workflows/docs.yml`](.github/workflows/docs.yml) 在推送 `main` 时自动构建发布（GitHub Pages + Actions）。  
+本地不要提交生成的 `docs/` 静态站（体积大，已 gitignore）。
 
 ## 许可证
 
