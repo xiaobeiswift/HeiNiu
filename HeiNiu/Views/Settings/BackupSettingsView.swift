@@ -230,7 +230,7 @@ struct BackupSettingsView: View {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.allowedContentTypes = [.json]
-        panel.message = "选择 HeiNiu 配置备份文件"
+        panel.message = "选择黑妞短剧配置备份文件"
 
         guard panel.runModal() == .OK, let url = panel.url else { return }
 
@@ -261,6 +261,6 @@ struct BackupSettingsView: View {
         formatter.dateFormat = "yyyyMMdd-HHmm"
         let stamp = formatter.string(from: Date())
         let suffix = includeAPIKeysOnExport ? "with-keys" : "no-keys"
-        return "HeiNiu-settings-\(stamp)-\(suffix).json"
+        return "黑妞短剧-settings-\(stamp)-\(suffix).json"
     }
 }

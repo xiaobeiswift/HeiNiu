@@ -1,38 +1,39 @@
-# 短剧工作台（HeiNiu）
+# 黑妞短剧
 
-macOS 短剧创作工作平台。第一阶段完成 **设置** 模块。
+面向短剧创作者的 macOS 工作台：把「服务商、提示词、生图、生视频」收拢到同一处配置，为后续剧本 / 分镜 / 资产生成打底。
 
-## 要求
+> 当前进度：**设置阶段**已可用。学习、剧本、分镜、资产库等业务模块仍在规划中。
 
-- macOS 15.0+
-- Xcode 16+（推荐 Xcode 26）
+![macOS](https://img.shields.io/badge/macOS-15%2B-black)
+![SwiftUI](https://img.shields.io/badge/SwiftUI-6-orange)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-## 打开与运行
+## 它解决什么问题
 
-```bash
-open /Volumes/Game/HeiNiu/HeiNiu.xcodeproj
-```
+做短剧时通常要同时面对：
 
-在 Xcode 中选择 target **HeiNiu**，运行（⌘R）。
+- 多家大模型 API（OpenAI 兼容、Anthropic…）
+- 生图、生视频各自不同的网关与模型
+- 大量可复用提示词（大纲、对白、分镜、角色立绘、物品卡…）
+- 换电脑后配置难迁移
 
-或命令行编译：
+**黑妞短剧**先把这些配置能力做扎实，再往上长创作流水线。
 
-```bash
-xcodebuild -project HeiNiu.xcodeproj -scheme HeiNiu -configuration Debug build
-```
+## 功能一览
 
-## 第一阶段功能
+### 服务商（LLM）
 
-### 服务商
-
-- 支持 **OpenAI 兼容** 与 **Anthropic** 协议
-- 配置名称、Base URL、模型列表、是否支持视觉
-- API Key 存入本机钥匙串
+- 协议：**OpenAI 兼容**、**Anthropic**
+- OpenAI 兼容支持两种接口模式：
+  - `Chat Completions` → `POST /chat/completions`
+  - `Responses` → `POST /responses`
+- 可配置名称、Base URL、模型列表、是否支持视觉
+- API Key 写入本机钥匙串
 - 支持测试连接
 
 ### 提示词库
 
-按创作环节分类，**每类可有多条**提示词（可新建 / 复制 / 删除）：
+按创作环节分类，**每类可有多条**提示词（新建 / 复制 / 删除）：
 
 | 分类 | 预置示例 |
 |------|----------|
@@ -44,19 +45,40 @@ xcodebuild -project HeiNiu.xcodeproj -scheme HeiNiu -configuration Debug build
 | 场景 | 场景卡提取、氛围与光影 |
 | 物品 | 物品卡提取、产品外观描述 |
 
-每条可配置名称、模板、服务商/模型、温度；自动保存。
+每条可绑定服务商、模型与温度；修改后自动保存。
 
-### 生图服务商
+### 生图 / 生视频
 
-- **可配置多家** OpenAI Images 兼容接口
-- 名称 / Base URL / 模型列表 / 默认尺寸 / API Key
-- 生图文案模板在「提示词库 → 生图」
+- **生图**：可配置多家 OpenAI Images 兼容服务商（模型、默认尺寸、Key）
+- **生视频**：可配置多家服务商（OpenAI 兼容 / 通用 HTTP，画幅、时长、Key）
+- 文案模板在「提示词库」对应分类中管理，接口与模板分离
 
-### 生视频服务商
+### 备份与迁移
 
-- **可配置多家**（OpenAI 兼容 / 通用 HTTP）
-- 名称 / Base URL / 模型列表 / 默认画幅 / 默认时长 / API Key
-- 生视频文案模板在「提示词库 → 生视频」
+- 导出 JSON 配置包（可选是否包含 API Key）
+- 导入支持 **合并** 或 **替换全部**
+- 日常配置自动落在本机 Application Support
+
+## 环境要求
+
+- macOS 15.0+
+- Xcode 16+（推荐最新稳定版）
+
+## 运行
+
+```bash
+git clone https://github.com/xiaobeiswift/HeiNiu.git
+cd HeiNiu
+open HeiNiu.xcodeproj
+```
+
+Xcode 中选择 target **HeiNiu**，⌘R 运行。
+
+命令行编译：
+
+```bash
+xcodebuild -project HeiNiu.xcodeproj -scheme HeiNiu -configuration Debug -destination 'platform=macOS' build
+```
 
 ## 数据存放
 
@@ -65,38 +87,31 @@ xcodebuild -project HeiNiu.xcodeproj -scheme HeiNiu -configuration Debug build
 | 服务商、提示词、生图/生视频配置 | `~/Library/Application Support/HeiNiu/settings.json` |
 | API Key | 本机钥匙串（service = `cn.codable.heiniu`） |
 
-### 换机迁移
-
-在 **设置 → 备份**：
-
-1. **导出配置…**  
-   - 默认不含 API Key（更安全）  
-   - 可选「导出时包含 API Key」（文件需妥善保管）
-2. 把 JSON 拷到新电脑  
-3. **选择配置文件…** 导入  
-   - **合并**：按 ID 更新/追加  
-   - **替换全部**：覆盖本机配置  
-
-也可手动复制 `settings.json`，但 API Key 不会随之迁移，仍需在新机器填写，或使用「含 Key」导出包。
+换机时请用应用内 **设置 → 备份**，不要只拷贝 `settings.json`（密钥不会一起带走，除非导出时勾选包含 Key）。
 
 ## 工程结构
 
 ```
 HeiNiu/
-├── HeiNiuApp.swift
-├── Models/          # LLMProvider, ImageProvider, PromptTask, PromptConfig
-├── Services/        # SettingsStore, KeychainHelper, AppPaths, DefaultPrompts
+├── HeiNiuApp.swift          # 入口
+├── Design/                  # 主题与通用 UI 组件
+├── Models/                  # LLM / 生图 / 生视频 / 提示词 / 备份
+├── Services/                # SettingsStore、Keychain、默认提示词
 └── Views/
-    ├── MainView.swift
-    ├── PlaceholderView.swift
-    └── Settings/    # 服务商 / 提示词 / 生图
+    ├── MainView.swift       # 侧栏导航
+    └── Settings/            # 服务商 · 提示词 · 生图 · 生视频 · 备份
 ```
 
-## 后续规划
+## 路线图
 
-- 学习 / 剧本 / 分镜 / 资产库业务模块
-- 更多协议（Gemini、本机 CLI 等）
-- 语音转写（ASR）设置
+- [x] 多协议 LLM 服务商与钥匙串存 Key
+- [x] 多分类提示词库
+- [x] 多家生图 / 生视频服务商
+- [x] 配置导入导出
+- [ ] 学习（视频理解 / 转写）
+- [ ] 剧本创作与改编
+- [ ] 分镜与视频提示词流水线
+- [ ] 角色 / 场景 / 物品资产库
 
 ## 许可证
 

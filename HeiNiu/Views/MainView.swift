@@ -64,9 +64,9 @@ struct MainView: View {
                         .foregroundStyle(AppTheme.accent)
                 }
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("短剧工作台")
+                    Text("黑妞短剧")
                         .font(.headline)
-                    Text("HeiNiu")
+                    Text("短剧创作工作台")
                         .font(.caption2)
                         .foregroundStyle(AppTheme.textTertiary)
                 }
