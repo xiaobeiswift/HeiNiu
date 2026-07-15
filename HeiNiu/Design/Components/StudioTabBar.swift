@@ -1,15 +1,31 @@
+/// 胶囊分段 Tab 与任务芯片条。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// StudioTabItem
+///
+/// `StudioTabItem` 类型定义。
 struct StudioTabItem: Identifiable, Hashable {
+    /// 唯一标识符。
     let id: String
+    /// 标题。
     let title: String
+    /// 用于 UI 的 SF Symbol。
     let systemImage: String
 }
 
+/// StudioTabBar
+///
+/// `StudioTabBar` 类型定义。
 struct StudioTabBar: View {
+    /// items。
     let items: [StudioTabItem]
     @Binding var selection: String
 
+    /// SwiftUI 视图内容。
     var body: some View {
         HStack(spacing: 4) {
             ForEach(items) { item in
@@ -48,12 +64,19 @@ struct StudioTabBar: View {
     }
 }
 
+/// TaskChipBar
+///
+/// `TaskChipBar` 类型定义。
 struct TaskChipBar<T: Hashable & Identifiable>: View where T: CaseIterable {
+    /// tasks。
     let tasks: [T]
+    /// 标题。
     @Binding var selection: T
     let title: (T) -> String
+    /// 用于 UI 的 SF Symbol。
     let systemImage: (T) -> String
 
+    /// SwiftUI 视图内容。
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -91,9 +114,14 @@ struct TaskChipBar<T: Hashable & Identifiable>: View where T: CaseIterable {
     }
 }
 
+/// AutoSaveIndicator
+///
+/// `AutoSaveIndicator` 类型定义。
 struct AutoSaveIndicator: View {
+    /// visible。
     var visible: Bool
 
+    /// SwiftUI 视图内容。
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark.circle.fill")

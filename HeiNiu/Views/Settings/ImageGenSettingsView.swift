@@ -1,12 +1,22 @@
+/// 生图服务商配置界面。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// ImageGenSettingsView
+///
+/// `ImageGenSettingsView` 类型定义。
 struct ImageGenSettingsView: View {
+    /// onSaved。
     @Environment(SettingsStore.self) private var settings
     var onSaved: () -> Void = {}
 
     @State private var expandedID: UUID?
     @State private var pendingDelete: ImageProvider?
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -85,6 +95,9 @@ struct ImageGenSettingsView: View {
         }
     }
 
+    /// 添加 LLM 服务商
+    ///
+    /// 添加 LLM 服务商。
     private func addProvider() {
         let provider = ImageProvider(name: "新的生图服务")
         settings.addImageProvider(provider)
@@ -97,13 +110,21 @@ struct ImageGenSettingsView: View {
 
 // MARK: - Card
 
+/// ImageProviderCard
+///
+/// `ImageProviderCard` 类型定义。
 private struct ImageProviderCard: View {
     @Environment(SettingsStore.self) private var settings
 
+    /// 按 ID 查找 LLM 服务商。
     let provider: ImageProvider
+    /// isExpanded。
     let isExpanded: Bool
+    /// onToggle。
     let onToggle: () -> Void
+    /// onDelete。
     let onDelete: () -> Void
+    /// onSaved。
     let onSaved: () -> Void
 
     @State private var draft: ImageProvider
@@ -114,6 +135,9 @@ private struct ImageProviderCard: View {
     @State private var debouncer = DebouncedAction()
     @State private var ready = false
 
+    /// 初始化方法
+    ///
+    /// 初始化方法。
     init(
         provider: ImageProvider,
         isExpanded: Bool,
@@ -129,10 +153,12 @@ private struct ImageProviderCard: View {
         _draft = State(initialValue: provider)
     }
 
+    /// hasKey。
     private var hasKey: Bool {
         !settings.imageAPIKey(for: provider.id).isEmpty || !apiKey.isEmpty
     }
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -166,6 +192,7 @@ private struct ImageProviderCard: View {
         .onChange(of: apiKey) { _, _ in schedulePersist() }
     }
 
+    /// header。
     private var header: some View {
         HStack(spacing: 12) {
             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
@@ -204,6 +231,7 @@ private struct ImageProviderCard: View {
         .padding(AppTheme.cardPadding)
     }
 
+    /// editor。
     private var editor: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 12) {
@@ -271,11 +299,17 @@ private struct ImageProviderCard: View {
         }
     }
 
+    /// schedulePersist
+    ///
+    /// 执行 `schedulePersist` 相关逻辑。
     private func schedulePersist() {
         guard ready else { return }
         debouncer.schedule { persist() }
     }
 
+    /// persist
+    ///
+    /// 执行 `persist` 相关逻辑。
     private func persist() {
         var cleaned = draft
         cleaned.name = cleaned.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -287,6 +321,9 @@ private struct ImageProviderCard: View {
         onSaved()
     }
 
+    /// runTest
+    ///
+    /// 执行 `runTest` 相关逻辑。
     private func runTest() async {
         persist()
         isTesting = true

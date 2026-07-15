@@ -52,3 +52,6 @@ fastlane/test_output
 *.p12
 .env
 .env.*
+
+# Generated DocC site (publish via GitHub Pages/Actions)
+docs/

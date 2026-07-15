@@ -1,13 +1,28 @@
+/// 空状态组件。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// EmptyStateView
+///
+/// `EmptyStateView` 类型定义。
 struct EmptyStateView: View {
+    /// 标题。
     let title: String
+    /// message。
     let message: String
+    /// 用于 UI 的 SF Symbol。
     var systemImage: String = "tray"
+    /// badge。
     var badge: String? = nil
+    /// actionTitle。
     var actionTitle: String? = nil
+    /// action。
     var action: (() -> Void)? = nil
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(spacing: 18) {
             ZStack {

@@ -1,0 +1,97 @@
+# 构建 DocC 并发布到 GitHub Pages
+# 仓库设置 → Pages → Source 选 “GitHub Actions”
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "HeiNiu/**"
+      - "HeiNiu.xcodeproj/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # 优先较新 Xcode；若不存在则用默认
+          if [ -d /Applications/Xcode_16.4.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app
+          elif [ -d /Applications/Xcode.app ]; then
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          xcodebuild -version
+
+      - name: Build documentation
+        run: |
+          set -euo pipefail
+          DERIVED="/tmp/HeiNiuDocCI"
+          rm -rf "$DERIVED"
+          xcodebuild docbuild \
+            -project HeiNiu.xcodeproj \
+            -scheme HeiNiu \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$DERIVED"
+
+          ARCHIVE=$(find "$DERIVED" -name 'HeiNiu.doccarchive' -type d | head -1)
+          echo "ARCHIVE=$ARCHIVE"
+          test -n "$ARCHIVE"
+
+          # GitHub project site: https://<user>.github.io/HeiNiu/
+          OUT="${{ github.workspace }}/_site"
+          rm -rf "$OUT"
+          xcrun docc process-archive transform-for-static-hosting "$ARCHIVE" \
+            --output-path "$OUT" \
+            --hosting-base-path HeiNiu
+
+          # 静态托管需要
+          touch "$OUT/.nojekyll"
+
+          # 根路径跳转到文档首页
+          if [ ! -f "$OUT/index.html" ]; then
+            printf '%s\n' \
+              '<!DOCTYPE html>' \
+              '<html lang="zh-Hans">' \
+              '<head>' \
+              '  <meta charset="utf-8" />' \
+              '  <meta http-equiv="refresh" content="0; url=documentation/heiniu/" />' \
+              '  <title>黑妞短剧文档</title>' \
+              '</head>' \
+              '<body>' \
+              '  <p><a href="documentation/heiniu/">进入黑妞短剧文档</a></p>' \
+              '</body>' \
+              '</html>' > "$OUT/index.html"
+          fi
+
+          du -sh "$OUT"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

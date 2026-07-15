@@ -1,14 +1,71 @@
+/// 全局设置仓库：服务商、提示词、MCP、备份。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import Foundation
 import Observation
 
+/// 全局设置仓库。
+///
+/// 管理应用级配置与密钥访问入口：
+///
+/// | 数据 | 位置 |
+/// |------|------|
+/// | 服务商 / 提示词 / MCP | `settings.json` |
+/// | API Key | 钥匙串（``KeychainHelper``） |
+///
+/// ## 设计原则
+///
+/// - **密钥永不入库**：JSON 不含 Key；删除服务商时同步删钥匙串。
+/// - **容错解码**：缺字段给默认值，升级不冲配置。
+/// - **模型拉取**：``fetchModels(for:)`` 解析 OpenAI 风格 `/models`。
+///
+/// ## 示例
+///
+/// ```swift
+/// let settings = SettingsStore()
+/// var provider = LLMProvider(name: "OpenAI", protocolType: .openAICompatible)
+/// settings.addProvider(provider)
+/// settings.setAPIKey("sk-xxx", for: provider.id)
+///
+/// if case .success(let models, let msg) = await settings.fetchModels(for: provider) {
+///     provider.models = models
+///     settings.updateProvider(provider)
+///     print(msg)
+/// }
+/// ```
+///
+/// - SeeAlso: <doc:SettingsAndProviders>, <doc:DataStorage>, ``LLMProvider``
+///
 @Observable
 @MainActor
 final class SettingsStore {
+    /// 已配置的 LLM 服务商。
+    ///
+    /// Key 不在此数组中；使用 ``apiKey(for:)`` / ``setAPIKey(_:for:)``。
+    ///
+    /// - SeeAlso: ``addProvider(_:)``, ``fetchModels(for:)``
+    ///
     var providers: [LLMProvider] = []
+    /// 提示词库全部条目（多分类多条）。
+    ///
+    /// 按分类筛选请在 UI 层对 `category` 过滤。默认模板见 ``DefaultPrompts``。
+    ///
     var promptItems: [PromptItem] = []
+    /// 生图服务商列表。
     var imageProviders: [ImageProvider] = []
+    /// 生视频服务商列表。
     var videoProviders: [VideoProvider] = []
+    /// 全局 MCP 服务器清单。
+    ///
+    /// 黑妞侧通过 ``AgentMCPMode`` 决定是否使用及手动勾选子集。
+    ///
+    /// - SeeAlso: ``addMCPServer(named:)``, ``MCPServer``
+    ///
+    var mcpServers: [MCPServer] = []
 
+    /// JSON 编码器（美化输出、ISO8601 日期）。
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -16,12 +73,16 @@ final class SettingsStore {
         return encoder
     }()
 
+    /// JSON 解码器（ISO8601 日期）。
     private let decoder: JSONDecoder = {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
     }()
 
+    /// 初始化方法
+    ///
+    /// 初始化方法。
     init() {
         AppPaths.ensureDirectories()
         load()
@@ -29,17 +90,29 @@ final class SettingsStore {
 
     // MARK: - LLM Provider CRUD
 
+    /// 追加 LLM 服务商并保存。
+    ///
+    /// - Parameter provider: 完整服务商配置（不含 Key）。
+    ///
     func addProvider(_ provider: LLMProvider) {
         providers.append(provider)
         save()
     }
 
+    /// 更新 LLM 服务商
+    ///
+    /// 更新 LLM 服务商。
     func updateProvider(_ provider: LLMProvider) {
         guard let index = providers.firstIndex(where: { $0.id == provider.id }) else { return }
         providers[index] = provider
         save()
     }
 
+    /// 删除服务商、清理钥匙串，并断开提示词中的绑定。
+    ///
+    /// - Parameter id: 服务商 ID。
+    /// - Note: 引用该服务商的 ``PromptItem/providerID`` 会被置空。
+    ///
     func deleteProvider(id: UUID) {
         providers.removeAll { $0.id == id }
         KeychainHelper.delete(account: Self.llmKeyAccount(id))
@@ -52,6 +125,9 @@ final class SettingsStore {
         save()
     }
 
+    /// 按 ID 查找 LLM 服务商
+    ///
+    /// 按 ID 查找 LLM 服务商。
     func provider(id: UUID?) -> LLMProvider? {
         guard let id else { return nil }
         return providers.first { $0.id == id }
@@ -59,23 +135,35 @@ final class SettingsStore {
 
     // MARK: - Image Provider CRUD
 
+    /// 添加生图服务商
+    ///
+    /// 添加生图服务商。
     func addImageProvider(_ provider: ImageProvider) {
         imageProviders.append(provider)
         save()
     }
 
+    /// 更新生图服务商
+    ///
+    /// 更新生图服务商。
     func updateImageProvider(_ provider: ImageProvider) {
         guard let index = imageProviders.firstIndex(where: { $0.id == provider.id }) else { return }
         imageProviders[index] = provider
         save()
     }
 
+    /// 删除生图服务商
+    ///
+    /// 删除生图服务商。
     func deleteImageProvider(id: UUID) {
         imageProviders.removeAll { $0.id == id }
         KeychainHelper.delete(account: Self.imageKeyAccount(id))
         save()
     }
 
+    /// 按 ID 查找生图服务商
+    ///
+    /// 按 ID 查找生图服务商。
     func imageProvider(id: UUID?) -> ImageProvider? {
         guard let id else { return nil }
         return imageProviders.first { $0.id == id }
@@ -83,56 +171,136 @@ final class SettingsStore {
 
     // MARK: - Video Provider CRUD
 
+    /// 添加生视频服务商
+    ///
+    /// 添加生视频服务商。
     func addVideoProvider(_ provider: VideoProvider) {
         videoProviders.append(provider)
         save()
     }
 
+    /// 更新生视频服务商
+    ///
+    /// 更新生视频服务商。
     func updateVideoProvider(_ provider: VideoProvider) {
         guard let index = videoProviders.firstIndex(where: { $0.id == provider.id }) else { return }
         videoProviders[index] = provider
         save()
     }
 
+    /// 删除生视频服务商
+    ///
+    /// 删除生视频服务商。
     func deleteVideoProvider(id: UUID) {
         videoProviders.removeAll { $0.id == id }
         KeychainHelper.delete(account: Self.videoKeyAccount(id))
         save()
     }
 
+    /// 按 ID 查找生视频服务商
+    ///
+    /// 按 ID 查找生视频服务商。
     func videoProvider(id: UUID?) -> VideoProvider? {
         guard let id else { return nil }
         return videoProviders.first { $0.id == id }
     }
 
+    // MARK: - MCP Servers
+
+    /// 按名称排序的 MCP 服务器。
+    var sortedMCPServers: [MCPServer] {
+        mcpServers.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    /// 按 ID 查找 MCP 服务器
+    ///
+    /// 按 ID 查找 MCP 服务器。
+    func mcpServer(id: UUID?) -> MCPServer? {
+        guard let id else { return nil }
+        return mcpServers.first { $0.id == id }
+    }
+
+    /// 添加 MCP 服务器
+    ///
+    /// 添加 MCP 服务器。
+    @discardableResult
+    func addMCPServer(named name: String = "新 MCP 服务器") -> MCPServer {
+        let server = MCPServer(name: name)
+        mcpServers.append(server)
+        save()
+        return server
+    }
+
+    /// 更新 MCP 服务器
+    ///
+    /// 更新 MCP 服务器。
+    func updateMCPServer(_ server: MCPServer) {
+        guard let index = mcpServers.firstIndex(where: { $0.id == server.id }) else { return }
+        var updated = server
+        updated.updatedAt = Date()
+        mcpServers[index] = updated
+        save()
+    }
+
+    /// 删除 MCP 服务器
+    ///
+    /// 删除 MCP 服务器。
+    func deleteMCPServer(id: UUID) {
+        mcpServers.removeAll { $0.id == id }
+        save()
+    }
+
     // MARK: - API Keys
 
+    /// 读取 LLM API Key。
+    ///
+    /// - Returns: 明文 Key；未设置则为空字符串。
+    ///
     func apiKey(for providerID: UUID) -> String {
         KeychainHelper.get(account: Self.llmKeyAccount(providerID)) ?? ""
     }
 
+    /// 写入或清除 LLM API Key（钥匙串）。
+    ///
+    /// 空字符串表示删除。账户名：`provider-<uuid>`。
+    ///
     func setAPIKey(_ key: String, for providerID: UUID) {
         setKey(key, account: Self.llmKeyAccount(providerID))
     }
 
+    /// 读取/设置生图 API Key
+    ///
+    /// 读取/设置生图 API Key。
     func imageAPIKey(for providerID: UUID) -> String {
         KeychainHelper.get(account: Self.imageKeyAccount(providerID)) ?? ""
     }
 
+    /// 写入生图服务商 API Key
+    ///
+    /// 写入生图服务商 API Key。
     func setImageAPIKey(_ key: String, for providerID: UUID) {
         setKey(key, account: Self.imageKeyAccount(providerID))
     }
 
+    /// 读取/设置生视频 API Key
+    ///
+    /// 读取/设置生视频 API Key。
     func videoAPIKey(for providerID: UUID) -> String {
         KeychainHelper.get(account: Self.videoKeyAccount(providerID)) ?? ""
     }
 
+    /// 写入生视频服务商 API Key
+    ///
+    /// 写入生视频服务商 API Key。
     func setVideoAPIKey(_ key: String, for providerID: UUID) {
         setKey(key, account: Self.videoKeyAccount(providerID))
     }
 
     // MARK: - Prompt library
 
+    /// prompts
+    ///
+    /// 执行 `prompts` 相关逻辑。
     func prompts(in category: PromptCategory) -> [PromptItem] {
         promptItems
             .filter { $0.category == category }
@@ -142,15 +310,24 @@ final class SettingsStore {
             }
     }
 
+    /// promptItem
+    ///
+    /// 执行 `promptItem` 相关逻辑。
     func promptItem(id: UUID?) -> PromptItem? {
         guard let id else { return nil }
         return promptItems.first { $0.id == id }
     }
 
+    /// count
+    ///
+    /// 执行 `count` 相关逻辑。
     func count(in category: PromptCategory) -> Int {
         promptItems.filter { $0.category == category }.count
     }
 
+    /// addPrompt
+    ///
+    /// 执行 `addPrompt` 相关逻辑。
     @discardableResult
     func addPrompt(in category: PromptCategory, name: String? = nil) -> PromptItem {
         let nextOrder = (prompts(in: category).map(\.sortOrder).max() ?? -1) + 1
@@ -166,6 +343,9 @@ final class SettingsStore {
         return item
     }
 
+    /// updatePrompt
+    ///
+    /// 执行 `updatePrompt` 相关逻辑。
     func updatePrompt(_ item: PromptItem) {
         guard let index = promptItems.firstIndex(where: { $0.id == item.id }) else { return }
         var updated = item
@@ -174,11 +354,17 @@ final class SettingsStore {
         save()
     }
 
+    /// deletePrompt
+    ///
+    /// 执行 `deletePrompt` 相关逻辑。
     func deletePrompt(id: UUID) {
         promptItems.removeAll { $0.id == id }
         save()
     }
 
+    /// duplicatePrompt
+    ///
+    /// 执行 `duplicatePrompt` 相关逻辑。
     @discardableResult
     func duplicatePrompt(id: UUID) -> PromptItem? {
         guard let source = promptItem(id: id) else { return nil }
@@ -194,6 +380,9 @@ final class SettingsStore {
         return copy
     }
 
+    /// resetPromptTemplate
+    ///
+    /// 执行 `resetPromptTemplate` 相关逻辑。
     func resetPromptTemplate(id: UUID) {
         guard let index = promptItems.firstIndex(where: { $0.id == id }) else { return }
         let item = promptItems[index]
@@ -210,11 +399,37 @@ final class SettingsStore {
 
     // MARK: - Connection test
 
+    /// 连通性测试结果。
+    ///
+    /// - `success`：可读提示文案  
+    /// - `failure`：错误说明  
+    ///
     enum ConnectionTestResult: Equatable {
+        /// success。
         case success(String)
+        /// failure。
         case failure(String)
     }
 
+    /// 拉取模型列表结果。
+    ///
+    /// - `success([String], String)`：模型 ID 与状态文案  
+    /// - `failure(String)`：错误说明  
+    ///
+    enum FetchModelsResult: Equatable {
+        /// success。
+        case success([String], String)
+        /// failure。
+        case failure(String)
+    }
+
+    /// 测试 LLM 服务商连通性。
+    ///
+    /// 成功时可能附带「可用模型约 N 个」提示。
+    ///
+    /// - Parameter provider: 目标服务商。
+    /// - Returns: ``ConnectionTestResult``。
+    ///
     func testConnection(for provider: LLMProvider) async -> ConnectionTestResult {
         let key = apiKey(for: provider.id)
         if key.isEmpty { return .failure("请先填写 API Key") }
@@ -227,6 +442,39 @@ final class SettingsStore {
         }
     }
 
+    /// 拉取服务商可用模型列表。
+    ///
+    /// OpenAI 兼容走 `GET {baseURL}/models`；Anthropic 尝试 `/v1/models`。
+    ///
+    /// - Parameter provider: 需已配置有效 Key。
+    /// - Returns: ``FetchModelsResult``（模型 ID 去重排序）。
+    ///
+    /// ```swift
+    /// switch await settings.fetchModels(for: provider) {
+    /// case .success(let models, let message):
+    ///     var p = provider; p.models = models; settings.updateProvider(p)
+    /// case .failure(let err):
+    ///     print(err)
+    /// }
+    /// ```
+    ///
+    /// - SeeAlso: ``testConnection(for:)-8kz2q``
+    ///
+    func fetchModels(for provider: LLMProvider) async -> FetchModelsResult {
+        let key = apiKey(for: provider.id)
+        if key.isEmpty { return .failure("请先填写 API Key") }
+
+        switch provider.protocolType {
+        case .openAICompatible:
+            return await fetchOpenAICompatibleModels(baseURL: provider.effectiveBaseURL, apiKey: key)
+        case .anthropic:
+            return await fetchAnthropicModels(baseURL: provider.effectiveBaseURL, apiKey: key)
+        }
+    }
+
+    /// 测试服务商连通性
+    ///
+    /// 测试服务商连通性。
     func testConnection(for provider: ImageProvider) async -> ConnectionTestResult {
         let key = imageAPIKey(for: provider.id)
         if key.isEmpty { return .failure("请先填写 API Key") }
@@ -234,6 +482,9 @@ final class SettingsStore {
         return await testOpenAICompatible(baseURL: provider.effectiveBaseURL, apiKey: key)
     }
 
+    /// 测试服务商连通性
+    ///
+    /// 测试服务商连通性。
     func testConnection(for provider: VideoProvider) async -> ConnectionTestResult {
         let key = videoAPIKey(for: provider.id)
         if key.isEmpty { return .failure("请先填写 API Key") }
@@ -244,6 +495,9 @@ final class SettingsStore {
 
     // MARK: - Persistence
 
+    /// 从磁盘加载持久化数据
+    ///
+    /// 从磁盘加载持久化数据。
     func load() {
         let url = AppPaths.settingsFileURL
         guard FileManager.default.fileExists(atPath: url.path) else {
@@ -259,6 +513,7 @@ final class SettingsStore {
             promptItems = persisted.promptItems
             imageProviders = persisted.imageProviders
             videoProviders = persisted.videoProviders
+            mcpServers = persisted.mcpServers
 
             var needsSave = false
 
@@ -299,13 +554,17 @@ final class SettingsStore {
         }
     }
 
+    /// 将当前状态写入磁盘
+    ///
+    /// 将当前状态写入磁盘。
     func save() {
         AppPaths.ensureDirectories()
         let persisted = PersistedSettings(
             providers: providers,
             promptItems: promptItems,
             imageProviders: imageProviders,
-            videoProviders: videoProviders
+            videoProviders: videoProviders,
+            mcpServers: mcpServers
         )
         do {
             let data = try encoder.encode(persisted)
@@ -322,6 +581,14 @@ final class SettingsStore {
         AppPaths.settingsFileURL.path
     }
 
+    /// 生成配置备份。
+    ///
+    /// - Parameter includeAPIKeys: `true` 时从钥匙串导出 Key（文件需保密）。
+    /// - Returns: ``SettingsBackup``。
+    ///
+    /// - Important: 含 Key 备份等同密钥文件。
+    /// - SeeAlso: ``exportBackupData(includeAPIKeys:)``, ``importBackup(_:mode:importAPIKeys:)``
+    ///
     func makeBackup(includeAPIKeys: Bool) -> SettingsBackup {
         var llmKeys: [String: String] = [:]
         var imageKeys: [String: String] = [:]
@@ -354,22 +621,37 @@ final class SettingsStore {
             promptItems: promptItems,
             imageProviders: imageProviders,
             videoProviders: videoProviders,
+            mcpServers: mcpServers,
             llmAPIKeys: llmKeys,
             imageAPIKeys: imageKeys,
             videoAPIKeys: videoKeys
         )
     }
 
+    /// 导出备份 JSON 数据
+    ///
+    /// 导出备份 JSON 数据。
     func exportBackupData(includeAPIKeys: Bool) throws -> Data {
         let backup = makeBackup(includeAPIKeys: includeAPIKeys)
         return try encoder.encode(backup)
     }
 
+    /// 解码备份文件
+    ///
+    /// 解码备份文件。
     func decodeBackup(from data: Data) throws -> SettingsBackup {
         try decoder.decode(SettingsBackup.self, from: data)
     }
 
-    /// 将备份应用到本机
+    /// 导入备份。
+    ///
+    /// - Parameters:
+    ///   - backup: 备份数据。
+    ///   - mode: 替换全部或按 ID 合并。
+    ///   - importAPIKeys: 是否写入钥匙串中的 Key。
+    ///
+    /// 替换模式会清理旧服务商钥匙串项。
+    ///
     func importBackup(_ backup: SettingsBackup, mode: SettingsImportMode, importAPIKeys: Bool) {
         switch mode {
         case .replace:
@@ -388,6 +670,7 @@ final class SettingsStore {
             promptItems = backup.promptItems
             imageProviders = backup.imageProviders
             videoProviders = backup.videoProviders
+            mcpServers = backup.mcpServers
 
             if importAPIKeys && backup.includeAPIKeys {
                 applyAPIKeys(from: backup)
@@ -398,6 +681,7 @@ final class SettingsStore {
             mergePromptItems(backup.promptItems)
             mergeProviders(backup.imageProviders, into: &imageProviders)
             mergeProviders(backup.videoProviders, into: &videoProviders)
+            mergeProviders(backup.mcpServers, into: &mcpServers)
 
             if importAPIKeys && backup.includeAPIKeys {
                 applyAPIKeys(from: backup)
@@ -410,15 +694,22 @@ final class SettingsStore {
 
     // MARK: - Private
 
+    /// applyDefaults
+    ///
+    /// 执行 `applyDefaults` 相关逻辑。
     private func applyDefaults() {
         providers = []
         promptItems = DefaultPrompts.seedItems()
         imageProviders = []
         videoProviders = []
+        mcpServers = []
     }
 
     /// 返回是否写入了新项
     @discardableResult
+    /// seedMissingBuiltInPrompts
+    ///
+    /// 执行 `seedMissingBuiltInPrompts` 相关逻辑。
     private func seedMissingBuiltInPrompts() -> Bool {
         var added = false
         let existing = Set(promptItems.map { "\($0.category.rawValue)|\($0.name)" })
@@ -435,6 +726,9 @@ final class SettingsStore {
         return added
     }
 
+    /// setKey
+    ///
+    /// 执行 `setKey` 相关逻辑。
     private func setKey(_ key: String, account: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -444,6 +738,9 @@ final class SettingsStore {
         }
     }
 
+    /// applyAPIKeys
+    ///
+    /// 执行 `applyAPIKeys` 相关逻辑。
     private func applyAPIKeys(from backup: SettingsBackup) {
         for (idString, key) in backup.llmAPIKeys {
             guard let id = UUID(uuidString: idString), !key.isEmpty else { continue }
@@ -459,6 +756,9 @@ final class SettingsStore {
         }
     }
 
+    /// mergeProviders
+    ///
+    /// 执行 `mergeProviders` 相关逻辑。
     private func mergeProviders<T: Identifiable>(_ incoming: [T], into existing: inout [T]) where T.ID == UUID {
         for item in incoming {
             if let index = existing.firstIndex(where: { $0.id == item.id }) {
@@ -469,6 +769,9 @@ final class SettingsStore {
         }
     }
 
+    /// mergePromptItems
+    ///
+    /// 执行 `mergePromptItems` 相关逻辑。
     private func mergePromptItems(_ incoming: [PromptItem]) {
         for item in incoming {
             if let index = promptItems.firstIndex(where: { $0.id == item.id }) {
@@ -479,11 +782,39 @@ final class SettingsStore {
         }
     }
 
+    /// llmKeyAccount
+    ///
+    /// 执行 `llmKeyAccount` 相关逻辑。
     private static func llmKeyAccount(_ id: UUID) -> String { "provider-\(id.uuidString)" }
+    /// imageKeyAccount
+    ///
+    /// 执行 `imageKeyAccount` 相关逻辑。
     private static func imageKeyAccount(_ id: UUID) -> String { "image-provider-\(id.uuidString)" }
+    /// videoKeyAccount
+    ///
+    /// 执行 `videoKeyAccount` 相关逻辑。
     private static func videoKeyAccount(_ id: UUID) -> String { "video-provider-\(id.uuidString)" }
 
+    /// testOpenAICompatible
+    ///
+    /// 执行 `testOpenAICompatible` 相关逻辑。
     private func testOpenAICompatible(baseURL: String, apiKey: String) async -> ConnectionTestResult {
+        switch await fetchOpenAICompatibleModels(baseURL: baseURL, apiKey: apiKey) {
+        case .success(let models, _):
+            return .success("连接成功，可用模型约 \(models.count) 个")
+        case .failure(let message):
+            // 兼容旧文案：404 仍算可达
+            if message.contains("404") {
+                return .success("端点可达（无 /models，请确认业务接口）")
+            }
+            return .failure(message)
+        }
+    }
+
+    /// fetchOpenAICompatibleModels
+    ///
+    /// 执行 `fetchOpenAICompatibleModels` 相关逻辑。
+    private func fetchOpenAICompatibleModels(baseURL: String, apiKey: String) async -> FetchModelsResult {
         guard let url = URL(string: "\(baseURL)/models") else {
             return .failure("Base URL 无效")
         }
@@ -491,7 +822,7 @@ final class SettingsStore {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 20
+        request.timeoutInterval = 30
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -499,15 +830,11 @@ final class SettingsStore {
                 return .failure("无效响应")
             }
             if (200...299).contains(http.statusCode) {
-                let count = Self.parseOpenAIModelCount(from: data)
-                if let count {
-                    return .success("连接成功，可用模型约 \(count) 个")
+                let models = Self.parseOpenAIModelIDs(from: data)
+                if models.isEmpty {
+                    return .failure("已连接，但未解析到模型列表")
                 }
-                return .success("连接成功")
-            }
-            // 部分视频网关没有 /models，404 但 Key 可能仍有效
-            if http.statusCode == 404 {
-                return .success("端点可达（无 /models，请确认业务接口）")
+                return .success(models, "已获取 \(models.count) 个模型")
             }
             let body = String(data: data, encoding: .utf8) ?? ""
             return .failure("HTTP \(http.statusCode)：\(body.prefix(200))")
@@ -516,6 +843,49 @@ final class SettingsStore {
         }
     }
 
+    /// fetchAnthropicModels
+    ///
+    /// 执行 `fetchAnthropicModels` 相关逻辑。
+    private func fetchAnthropicModels(baseURL: String, apiKey: String) async -> FetchModelsResult {
+        // 部分代理兼容 OpenAI /models；官方 Anthropic 也有 /v1/models
+        if case .success(let models, let msg) = await fetchOpenAICompatibleModels(
+            baseURL: baseURL.hasSuffix("/v1") ? baseURL : baseURL,
+            apiKey: apiKey
+        ), !models.isEmpty {
+            return .success(models, msg)
+        }
+
+        guard let url = URL(string: "\(baseURL)/v1/models") else {
+            return .failure("Base URL 无效")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.timeoutInterval = 30
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure("无效响应")
+            }
+            if (200...299).contains(http.statusCode) {
+                let models = Self.parseOpenAIModelIDs(from: data)
+                if models.isEmpty {
+                    return .failure("已连接，但未解析到模型列表")
+                }
+                return .success(models, "已获取 \(models.count) 个模型")
+            }
+            let body = String(data: data, encoding: .utf8) ?? ""
+            return .failure("HTTP \(http.statusCode)：\(body.prefix(200))")
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    /// testAnthropic
+    ///
+    /// 执行 `testAnthropic` 相关逻辑。
     private func testAnthropic(baseURL: String, apiKey: String) async -> ConnectionTestResult {
         guard let url = URL(string: "\(baseURL)/v1/messages") else {
             return .failure("Base URL 无效")
@@ -528,6 +898,7 @@ final class SettingsStore {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 20
 
+        /// SwiftUI 视图内容。
         let body: [String: Any] = [
             "model": "claude-haiku-4-20250414",
             "max_tokens": 1,
@@ -553,44 +924,86 @@ final class SettingsStore {
         }
     }
 
-    private static func parseOpenAIModelCount(from data: Data) -> Int? {
+    /// parseOpenAIModelIDs
+    ///
+    /// 执行 `parseOpenAIModelIDs` 相关逻辑。
+    private static func parseOpenAIModelIDs(from data: Data) -> [String] {
+        /// ModelsResponse
+        ///
+        /// `ModelsResponse` 类型定义。
         struct ModelsResponse: Decodable {
+            /// Item
+            ///
+            /// `Item` 类型定义。
             struct Item: Decodable { let id: String }
+            /// data。
             let data: [Item]?
         }
-        return try? JSONDecoder().decode(ModelsResponse.self, from: data).data?.count
+        let ids = (try? JSONDecoder().decode(ModelsResponse.self, from: data))?.data?.map(\.id) ?? []
+        // 去重并稳定排序（忽略大小写）
+        var seen = Set<String>()
+        var unique: [String] = []
+        for id in ids where !id.isEmpty {
+            let key = id.lowercased()
+            if seen.insert(key).inserted {
+                unique.append(id)
+            }
+        }
+        return unique.sorted {
+            $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+        }
     }
 }
 
 // MARK: - Persisted shape
 
+/// PersistedSettings
+///
+/// `PersistedSettings` 类型定义。
 private struct PersistedSettings: Codable {
+    /// LLM 服务商列表。
     var providers: [LLMProvider]
+    /// 提示词库全部条目。
     var promptItems: [PromptItem]
+    /// 生图服务商列表。
     var imageProviders: [ImageProvider]
+    /// 生视频服务商列表。
     var videoProviders: [VideoProvider]
+    /// 全局 MCP 服务器列表。
+    var mcpServers: [MCPServer]
 
+    /// migratedFromLegacyPrompts。
     var migratedFromLegacyPrompts: [PromptItem]?
+    /// legacyImageGen。
     var legacyImageGen: LegacyImageGen?
 
+    /// 初始化方法
+    ///
+    /// 初始化方法。
     init(
         providers: [LLMProvider],
         promptItems: [PromptItem],
         imageProviders: [ImageProvider],
-        videoProviders: [VideoProvider]
+        videoProviders: [VideoProvider],
+        mcpServers: [MCPServer]
     ) {
         self.providers = providers
         self.promptItems = promptItems
         self.imageProviders = imageProviders
         self.videoProviders = videoProviders
+        self.mcpServers = mcpServers
         self.migratedFromLegacyPrompts = nil
         self.legacyImageGen = nil
     }
 
+    /// 初始化方法
+    ///
+    /// 初始化方法。
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         providers = try container.decodeIfPresent([LLMProvider].self, forKey: .providers) ?? []
         videoProviders = try container.decodeIfPresent([VideoProvider].self, forKey: .videoProviders) ?? []
+        mcpServers = try container.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
 
         if let items = try container.decodeIfPresent([ImageProvider].self, forKey: .imageProviders) {
             imageProviders = items
@@ -615,19 +1028,33 @@ private struct PersistedSettings: Codable {
         }
     }
 
+    /// encode
+    ///
+    /// 执行 `encode` 相关逻辑。
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(providers, forKey: .providers)
         try container.encode(promptItems, forKey: .promptItems)
         try container.encode(imageProviders, forKey: .imageProviders)
         try container.encode(videoProviders, forKey: .videoProviders)
+        try container.encode(mcpServers, forKey: .mcpServers)
     }
 
+    /// CodingKeys
+    ///
+    /// `CodingKeys` 类型定义。
     private enum CodingKeys: String, CodingKey {
-        case providers, promptItems, imageProviders, videoProviders, imageGen, prompts
+        /// LLM 服务商列表
+        ///
+        /// LLM 服务商列表。
+        case providers, promptItems, imageProviders, videoProviders, mcpServers, imageGen, prompts
     }
 
+    /// migrateLegacyPrompts
+    ///
+    /// 执行 `migrateLegacyPrompts` 相关逻辑。
     private static func migrateLegacyPrompts(_ dict: [String: LegacyPromptConfig]) -> [PromptItem] {
+        /// mapping。
         let mapping: [String: (PromptCategory, String)] = [
             "scriptCreation": (.script, "完整剧本"),
             "scriptConversion": (.script, "源文本改编"),
@@ -665,12 +1092,22 @@ private struct PersistedSettings: Codable {
     }
 }
 
+/// LegacyImageGen
+///
+/// `LegacyImageGen` 类型定义。
 private struct LegacyImageGen: Codable {
+    /// 类型枚举。
     var kind: ImageProviderKind
+    /// API 根地址。
     var baseURL: String
+    /// 模型 ID。
     var model: String
+    /// size。
     var size: String
 
+    /// 初始化方法
+    ///
+    /// 初始化方法。
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         kind = try container.decodeIfPresent(ImageProviderKind.self, forKey: .kind) ?? .openAIImages
@@ -679,17 +1116,31 @@ private struct LegacyImageGen: Codable {
         size = try container.decodeIfPresent(String.self, forKey: .size) ?? ImageProvider.defaultSize
     }
 
+    /// CodingKeys
+    ///
+    /// `CodingKeys` 类型定义。
     private enum CodingKeys: String, CodingKey {
+        /// 类型枚举。
         case kind, baseURL, model, size
     }
 }
 
+/// LegacyPromptConfig
+///
+/// `LegacyPromptConfig` 类型定义。
 private struct LegacyPromptConfig: Codable {
+    /// 模板正文。
     var template: String
+    /// 绑定的服务商 ID。
     var providerID: UUID?
+    /// 模型 ID。
     var model: String
+    /// 采样温度。
     var temperature: Double
 
+    /// 初始化方法
+    ///
+    /// 初始化方法。
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         template = try container.decodeIfPresent(String.self, forKey: .template) ?? ""
@@ -698,7 +1149,11 @@ private struct LegacyPromptConfig: Codable {
         temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? 0.7
     }
 
+    /// CodingKeys
+    ///
+    /// `CodingKeys` 类型定义。
     private enum CodingKeys: String, CodingKey {
+        /// 模板正文。
         case template, providerID, model, temperature
     }
 }

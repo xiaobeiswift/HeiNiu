@@ -1,21 +1,41 @@
+/// PromptItem 模块。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import Foundation
 
-/// 提示词库中的一条可复用提示词
+/// 提示词库中的一条可复用提示词。
+///
+/// 按 ``PromptCategory`` 分组；可绑定 LLM 服务商与模型。
+///
+/// - Note: 与黑妞「技能」不同：提示词库面向创作流水线槽位，技能面向聊天 `$命令`。
 struct PromptItem: Identifiable, Codable, Hashable {
+    /// 唯一 ID。
     var id: UUID
+    /// 所属创作分类。
     var category: PromptCategory
+    /// 显示名称。
     var name: String
+    /// 提示词模板正文（可含 `{{variable}}`）。
     var template: String
+    /// 绑定的 LLM 服务商；`nil` 表示未绑定。
     var providerID: UUID?
+    /// 模型 ID。
     var model: String
+    /// 采样温度。
     var temperature: Double
-    /// 是否为系统预置（可改模板，删除时给确认提示）
+    /// 是否为系统预置（影响删除提示文案）。
     var isBuiltIn: Bool
+    /// 同分类内排序权重，越小越靠前。
     var sortOrder: Int
+    /// 最近更新时间。
     var updatedAt: Date
 
+    /// 默认温度。
     static let defaultTemperature: Double = 0.7
 
+    /// 创建提示词条目。
     init(
         id: UUID = UUID(),
         category: PromptCategory,
@@ -40,6 +60,7 @@ struct PromptItem: Identifiable, Codable, Hashable {
         self.updatedAt = updatedAt
     }
 
+    /// 容错解码。
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
@@ -54,7 +75,11 @@ struct PromptItem: Identifiable, Codable, Hashable {
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 
+    /// CodingKeys
+    ///
+    /// `CodingKeys` 类型定义。
     private enum CodingKeys: String, CodingKey {
+        /// 唯一标识符。
         case id, category, name, template, providerID, model, temperature, isBuiltIn, sortOrder, updatedAt
     }
 }

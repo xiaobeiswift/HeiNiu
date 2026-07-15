@@ -1,11 +1,22 @@
+/// 提示词库默认模板。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import Foundation
 
+/// DefaultPrompts
+///
+/// `DefaultPrompts` 类型定义。
 enum DefaultPrompts {
     /// 首次启动预置的多条提示词（按创作环节分组）
     static func seedItems() -> [PromptItem] {
         var items: [PromptItem] = []
         var order = 0
 
+        /// add
+        ///
+        /// 执行 `add` 相关逻辑。
         func add(_ category: PromptCategory, _ name: String, _ template: String) {
             items.append(
                 PromptItem(

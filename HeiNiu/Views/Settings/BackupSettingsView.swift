@@ -1,8 +1,17 @@
+/// 配置导入导出与本机路径说明。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 import UniformTypeIdentifiers
 import AppKit
 
+/// BackupSettingsView
+///
+/// `BackupSettingsView` 类型定义。
 struct BackupSettingsView: View {
+    /// onSaved。
     @Environment(SettingsStore.self) private var settings
     var onSaved: () -> Void = {}
 
@@ -16,6 +25,7 @@ struct BackupSettingsView: View {
     @State private var showImportConfirm = false
     @State private var isBusy = false
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.sectionSpacing) {
             VStack(alignment: .leading, spacing: 4) {
@@ -145,6 +155,7 @@ struct BackupSettingsView: View {
         }
     }
 
+    /// summaryChips。
     private var summaryChips: some View {
         HStack(spacing: 8) {
             StatusBadge(text: "LLM \(settings.providers.count)", style: .neutral)
@@ -154,6 +165,9 @@ struct BackupSettingsView: View {
         }
     }
 
+    /// storageRow
+    ///
+    /// 执行 `storageRow` 相关逻辑。
     private func storageRow(title: String, value: String, systemImage: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Label(title, systemImage: systemImage)
@@ -173,12 +187,15 @@ struct BackupSettingsView: View {
         }
     }
 
+    /// importConfirmTitle。
     private var importConfirmTitle: String {
         importMode == .replace ? "替换本机全部配置？" : "合并导入配置？"
     }
 
+    /// importConfirmMessage。
     private var importConfirmMessage: String {
         guard let backup = pendingBackup else { return "" }
+        /// keysNote。
         let keysNote: String
         if backup.includeAPIKeys {
             keysNote = importAPIKeys ? "备份含 API Key，将写入钥匙串。" : "备份含 API Key，但本次不导入密钥。"
@@ -194,6 +211,9 @@ struct BackupSettingsView: View {
 
     // MARK: - Actions
 
+    /// exportBackup
+    ///
+    /// 执行 `exportBackup` 相关逻辑。
     private func exportBackup() {
         isBusy = true
         defer { isBusy = false }
@@ -224,6 +244,9 @@ struct BackupSettingsView: View {
         }
     }
 
+    /// pickImportFile
+    ///
+    /// 执行 `pickImportFile` 相关逻辑。
     private func pickImportFile() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
@@ -248,6 +271,9 @@ struct BackupSettingsView: View {
         }
     }
 
+    /// applyImport
+    ///
+    /// 执行 `applyImport` 相关逻辑。
     private func applyImport(_ backup: SettingsBackup) {
         settings.importBackup(backup, mode: importMode, importAPIKeys: importAPIKeys)
         pendingBackup = nil
@@ -256,6 +282,9 @@ struct BackupSettingsView: View {
         onSaved()
     }
 
+    /// defaultExportFileName
+    ///
+    /// 执行 `defaultExportFileName` 相关逻辑。
     private func defaultExportFileName() -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmm"

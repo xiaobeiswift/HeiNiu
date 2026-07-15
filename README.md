@@ -21,6 +21,34 @@
 
 ## 功能一览
 
+### 黑妞（类似 Gem / Custom GPT）
+
+自定义 AI 角色：名称、人设指令、开场建议、绑定服务商与模型。  
+预置「编剧黑妞 / 分镜黑妞 / 提示词黑妞」，可新建、编辑、复制、删除，并在应用内直接对话。
+
+### 配置分区
+
+侧栏 **配置** 下：
+
+| 入口 | 内容 |
+|------|------|
+| 设置 | LLM / 提示词 / 生图 / 生视频 / 备份 |
+| 技能 | 插件 + 技能库（内置 / 个人）；聊天用 `$命令` 调用 |
+| MCP | 全局 MCP 服务器清单 |
+
+### 黑妞编辑（左导航）
+
+| 页 | 内容 |
+|----|------|
+| 模型设置 | 服务商、模型、温度、可调用技能勾选 |
+| 提示词设置 | 系统指令 |
+| 知识库设置 | 本黑妞资料 |
+| MCP 服务器 | 禁用 / 自动 / 手动（手动再勾选服务器） |
+| 常用短语 | 开场建议 |
+| 基本资料 | 名称、简介、图标 |
+
+增强能力：附件、插入会话、上下文容量显示在聊天输入区。
+
 ### 服务商（LLM）
 
 - 协议：**OpenAI 兼容**、**Anthropic**
@@ -85,6 +113,10 @@ xcodebuild -project HeiNiu.xcodeproj -scheme HeiNiu -configuration Debug -destin
 | 内容 | 位置 |
 |------|------|
 | 服务商、提示词、生图/生视频配置 | `~/Library/Application Support/HeiNiu/settings.json` |
+| 黑妞角色 | `~/Library/Application Support/HeiNiu/agents.json` |
+| 黑妞对话 | `~/Library/Application Support/HeiNiu/conversations.json` |
+| 知识库索引 / 文件 | `knowledge.json` + `Knowledge/<agentID>/` |
+| 技能 | `skills.json` |
 | API Key | 本机钥匙串（service = `cn.codable.heiniu`） |
 
 换机时请用应用内 **设置 → 备份**，不要只拷贝 `settings.json`（密钥不会一起带走，除非导出时勾选包含 Key）。
@@ -108,10 +140,39 @@ HeiNiu/
 - [x] 多分类提示词库
 - [x] 多家生图 / 生视频服务商
 - [x] 配置导入导出
+- [x] 黑妞（自定义 AI 角色 + 对话）
 - [ ] 学习（视频理解 / 转写）
 - [ ] 剧本创作与改编
 - [ ] 分镜与视频提示词流水线
 - [ ] 角色 / 场景 / 物品资产库
+
+## 文档（Xcode DocC）
+
+工程内已按 **DocC** 编写中文文档注释，并附带长久记忆文章：
+
+- 代码注释：`///`（类型 / 成员）
+- 文档目录：`HeiNiu/HeiNiu.docc/`
+- 仓库协作记忆：`AGENTS.md`
+
+### 本地预览
+
+在 Xcode 中：
+
+**Product → Build Documentation**（⌃⇧⌘D）
+
+### 发布到 GitHub Pages
+
+本仓库提供工作流 [`.github/workflows/docs.yml`](.github/workflows/docs.yml)：
+
+1. 打开 GitHub 仓库 **Settings → Pages**
+2. **Build and deployment → Source** 选择 **GitHub Actions**
+3. 推送到 `main`（或手动 **Actions → Documentation → Run workflow**）
+
+发布成功后访问：
+
+**https://xiaobeiswift.github.io/HeiNiu/documentation/heiniu/**
+
+> 文档由 CI 构建，不必把庞大的 `docs/` 静态站提交进 Git。
 
 ## 许可证
 

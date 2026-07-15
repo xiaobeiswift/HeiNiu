@@ -1,12 +1,22 @@
+/// 生视频服务商配置界面。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// VideoGenSettingsView
+///
+/// `VideoGenSettingsView` 类型定义。
 struct VideoGenSettingsView: View {
+    /// onSaved。
     @Environment(SettingsStore.self) private var settings
     var onSaved: () -> Void = {}
 
     @State private var expandedID: UUID?
     @State private var pendingDelete: VideoProvider?
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -85,6 +95,9 @@ struct VideoGenSettingsView: View {
         }
     }
 
+    /// 添加 LLM 服务商
+    ///
+    /// 添加 LLM 服务商。
     private func addProvider() {
         let provider = VideoProvider(name: "新的生视频服务")
         settings.addVideoProvider(provider)
@@ -97,13 +110,21 @@ struct VideoGenSettingsView: View {
 
 // MARK: - Card
 
+/// VideoProviderCard
+///
+/// `VideoProviderCard` 类型定义。
 private struct VideoProviderCard: View {
     @Environment(SettingsStore.self) private var settings
 
+    /// 按 ID 查找 LLM 服务商。
     let provider: VideoProvider
+    /// isExpanded。
     let isExpanded: Bool
+    /// onToggle。
     let onToggle: () -> Void
+    /// onDelete。
     let onDelete: () -> Void
+    /// onSaved。
     let onSaved: () -> Void
 
     @State private var draft: VideoProvider
@@ -114,6 +135,9 @@ private struct VideoProviderCard: View {
     @State private var debouncer = DebouncedAction()
     @State private var ready = false
 
+    /// 初始化方法
+    ///
+    /// 初始化方法。
     init(
         provider: VideoProvider,
         isExpanded: Bool,
@@ -129,10 +153,12 @@ private struct VideoProviderCard: View {
         _draft = State(initialValue: provider)
     }
 
+    /// hasKey。
     private var hasKey: Bool {
         !settings.videoAPIKey(for: provider.id).isEmpty || !apiKey.isEmpty
     }
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -166,6 +192,7 @@ private struct VideoProviderCard: View {
         .onChange(of: apiKey) { _, _ in schedulePersist() }
     }
 
+    /// header。
     private var header: some View {
         HStack(spacing: 12) {
             Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
@@ -205,6 +232,7 @@ private struct VideoProviderCard: View {
         .padding(AppTheme.cardPadding)
     }
 
+    /// editor。
     private var editor: some View {
         VStack(alignment: .leading, spacing: 18) {
             VStack(alignment: .leading, spacing: 12) {
@@ -307,11 +335,17 @@ private struct VideoProviderCard: View {
         }
     }
 
+    /// schedulePersist
+    ///
+    /// 执行 `schedulePersist` 相关逻辑。
     private func schedulePersist() {
         guard ready else { return }
         debouncer.schedule { persist() }
     }
 
+    /// persist
+    ///
+    /// 执行 `persist` 相关逻辑。
     private func persist() {
         var cleaned = draft
         cleaned.name = cleaned.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -323,6 +357,9 @@ private struct VideoProviderCard: View {
         onSaved()
     }
 
+    /// runTest
+    ///
+    /// 执行 `runTest` 相关逻辑。
     private func runTest() async {
         persist()
         isTesting = true
@@ -341,9 +378,13 @@ private struct VideoProviderCard: View {
     }
 }
 
+/// DurationChipSelector
+///
+/// `DurationChipSelector` 类型定义。
 private struct DurationChipSelector: View {
     @Binding var selection: Int
 
+    /// SwiftUI 视图内容。
     var body: some View {
         FlowLayout(spacing: 8) {
             ForEach(VideoProvider.availableDurations, id: \.self) { seconds in

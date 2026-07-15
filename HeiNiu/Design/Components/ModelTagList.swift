@@ -1,9 +1,18 @@
+/// 模型标签列表与流式布局。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// ModelTagList
+///
+/// `ModelTagList` 类型定义。
 struct ModelTagList: View {
     @Binding var models: [String]
     @State private var newModel = ""
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if models.isEmpty {
@@ -53,6 +62,9 @@ struct ModelTagList: View {
         }
     }
 
+    /// add
+    ///
+    /// 执行 `add` 相关逻辑。
     private func add() {
         let name = newModel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
@@ -65,13 +77,20 @@ struct ModelTagList: View {
 
 /// Simple wrapping layout for tags/chips
 struct FlowLayout: Layout {
+    /// spacing。
     var spacing: CGFloat = 8
 
+    /// sizeThatFits
+    ///
+    /// 执行 `sizeThatFits` 相关逻辑。
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let result = arrange(proposal: proposal, subviews: subviews)
         return result.size
     }
 
+    /// placeSubviews
+    ///
+    /// 执行 `placeSubviews` 相关逻辑。
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let result = arrange(proposal: proposal, subviews: subviews)
         for (index, frame) in result.frames.enumerated() {
@@ -82,6 +101,9 @@ struct FlowLayout: Layout {
         }
     }
 
+    /// arrange
+    ///
+    /// 执行 `arrange` 相关逻辑。
     private func arrange(proposal: ProposedViewSize, subviews: Subviews) -> (size: CGSize, frames: [CGRect]) {
         let maxWidth = proposal.width ?? .infinity
         var frames: [CGRect] = []
@@ -107,10 +129,15 @@ struct FlowLayout: Layout {
     }
 }
 
+/// ChipSelector
+///
+/// `ChipSelector` 类型定义。
 struct ChipSelector: View {
+    /// items。
     let items: [String]
     @Binding var selection: String
 
+    /// SwiftUI 视图内容。
     var body: some View {
         FlowLayout(spacing: 8) {
             ForEach(items, id: \.self) { item in

@@ -1,17 +1,34 @@
+/// PromptCategory 模块。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import Foundation
 
-/// 创作环节分类：每个分类下可挂多条提示词
+/// 提示词库的创作环节分类。
+///
+/// 每个分类下可挂多条 ``PromptItem``。
+/// 生图 / 生视频的**文案模板**也在此管理；接口配置在各自设置页。
 enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
+    /// 剧本相关。
     case script
+    /// 分镜相关。
     case storyboard
+    /// 生图提示词。
     case image
+    /// 生视频提示词。
     case video
+    /// 角色提取与描述。
     case character
+    /// 场景提取与氛围。
     case scene
+    /// 物品 / 道具 / 产品。
     case item
 
+    /// 稳定标识符（等于 `rawValue`）。
     var id: String { rawValue }
 
+    /// 界面显示名称。
     var displayName: String {
         switch self {
         case .script: "剧本"
@@ -24,6 +41,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// SF Symbol 名称。
     var systemImage: String {
         switch self {
         case .script: "doc.text"
@@ -36,6 +54,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// 分类副标题（列表说明）。
     var subtitle: String {
         switch self {
         case .script: "大纲、对白、润色与改编"
@@ -48,7 +67,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// 该分类下常用变量（新建提示词时作为提示）
+    /// 该分类模板中建议使用的变量名（不含花括号）。
     var suggestedVariables: [String] {
         switch self {
         case .script: ["brief", "product", "source", "style"]
@@ -61,6 +80,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// 带 `{{ }}` 的变量芯片文案。
     var variableChips: [String] {
         suggestedVariables.map { "{{\($0)}}" }
     }

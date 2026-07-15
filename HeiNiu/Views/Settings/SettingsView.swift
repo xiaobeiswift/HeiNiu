@@ -1,14 +1,31 @@
+/// 设置页顶部分段容器。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// SettingsPane
+///
+/// `SettingsPane` 类型定义。
 enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
+    /// LLM 服务商列表
+    ///
+    /// LLM 服务商列表。
     case providers
+    /// prompts。
     case prompts
+    /// imageGen。
     case imageGen
+    /// videoGen。
     case videoGen
+    /// backup。
     case backup
 
+    /// 唯一标识符。
     var id: String { rawValue }
 
+    /// 标题。
     var title: String {
         switch self {
         case .providers: "服务商"
@@ -19,6 +36,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// 用于 UI 的 SF Symbol。
     var systemImage: String {
         switch self {
         case .providers: "server.rack"
@@ -29,20 +47,26 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
+    /// tabItems。
     static var tabItems: [StudioTabItem] {
         allCases.map { StudioTabItem(id: $0.rawValue, title: $0.title, systemImage: $0.systemImage) }
     }
 }
 
+/// SettingsView
+///
+/// `SettingsView` 类型定义。
 struct SettingsView: View {
     @State private var paneRaw: String = SettingsPane.providers.rawValue
     @State private var showSaved = false
     @State private var savedHideTask: Task<Void, Never>?
 
+    /// pane。
     private var pane: SettingsPane {
         SettingsPane(rawValue: paneRaw) ?? .providers
     }
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
@@ -73,6 +97,7 @@ struct SettingsView: View {
         .background(AppTheme.bgBase)
     }
 
+    /// header。
     private var header: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .firstTextBaseline) {
@@ -92,6 +117,9 @@ struct SettingsView: View {
         .studioContentWidth()
     }
 
+    /// flashSaved
+    ///
+    /// 执行 `flashSaved` 相关逻辑。
     private func flashSaved() {
         showSaved = true
         savedHideTask?.cancel()

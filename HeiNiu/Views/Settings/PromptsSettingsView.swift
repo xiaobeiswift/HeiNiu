@@ -1,6 +1,15 @@
+/// 多分类提示词库管理界面。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// PromptsSettingsView
+///
+/// `PromptsSettingsView` 类型定义。
 struct PromptsSettingsView: View {
+    /// onSaved。
     @Environment(SettingsStore.self) private var settings
     var onSaved: () -> Void = {}
 
@@ -8,10 +17,12 @@ struct PromptsSettingsView: View {
     @State private var selectedID: UUID?
     @State private var pendingDelete: PromptItem?
 
+    /// items。
     private var items: [PromptItem] {
         settings.prompts(in: selectedCategory)
     }
 
+    /// selectedItem。
     private var selectedItem: PromptItem? {
         if let selectedID, let item = settings.promptItem(id: selectedID), item.category == selectedCategory {
             return item
@@ -19,6 +30,7 @@ struct PromptsSettingsView: View {
         return items.first
     }
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
@@ -90,6 +102,7 @@ struct PromptsSettingsView: View {
         }
     }
 
+    /// header。
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
@@ -112,6 +125,7 @@ struct PromptsSettingsView: View {
         }
     }
 
+    /// categoryChips。
     private var categoryChips: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
@@ -155,6 +169,7 @@ struct PromptsSettingsView: View {
         }
     }
 
+    /// promptList。
     private var promptList: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(selectedCategory.subtitle)
@@ -195,6 +210,9 @@ struct PromptsSettingsView: View {
         )
     }
 
+    /// addPrompt
+    ///
+    /// 执行 `addPrompt` 相关逻辑。
     private func addPrompt() {
         let item = settings.addPrompt(in: selectedCategory)
         selectedID = item.id
@@ -204,13 +222,22 @@ struct PromptsSettingsView: View {
 
 // MARK: - List row
 
+/// PromptListRow
+///
+/// `PromptListRow` 类型定义。
 private struct PromptListRow: View {
+    /// item。
     let item: PromptItem
+    /// isSelected。
     let isSelected: Bool
+    /// onSelect。
     let onSelect: () -> Void
+    /// onDuplicate。
     let onDuplicate: () -> Void
+    /// onDelete。
     let onDelete: () -> Void
 
+    /// SwiftUI 视图内容。
     var body: some View {
         HStack(spacing: 8) {
             Button(action: onSelect) {
@@ -264,9 +291,14 @@ private struct PromptListRow: View {
 
 // MARK: - Editor
 
+/// PromptEditorPanel
+///
+/// `PromptEditorPanel` 类型定义。
 private struct PromptEditorPanel: View {
+    /// itemID。
     @Environment(SettingsStore.self) private var settings
     let itemID: UUID
+    /// onSaved。
     let onSaved: () -> Void
 
     @State private var name: String = ""
@@ -278,10 +310,12 @@ private struct PromptEditorPanel: View {
     @State private var debouncer = DebouncedAction()
     @State private var ready = false
 
+    /// selectedProvider。
     private var selectedProvider: LLMProvider? {
         settings.provider(id: providerID)
     }
 
+    /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: AppTheme.sectionSpacing) {
             StudioCard(title: "基本信息") {
@@ -414,6 +448,9 @@ private struct PromptEditorPanel: View {
         .onChange(of: category) { _, _ in scheduleSave() }
     }
 
+    /// 从磁盘加载持久化数据
+    ///
+    /// 从磁盘加载持久化数据。
     private func load() {
         ready = false
         debouncer.cancel()
@@ -430,11 +467,17 @@ private struct PromptEditorPanel: View {
         }
     }
 
+    /// scheduleSave
+    ///
+    /// 执行 `scheduleSave` 相关逻辑。
     private func scheduleSave() {
         guard ready else { return }
         debouncer.schedule { save() }
     }
 
+    /// 将当前状态写入磁盘
+    ///
+    /// 将当前状态写入磁盘。
     private func save() {
         guard var item = settings.promptItem(id: itemID) else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)

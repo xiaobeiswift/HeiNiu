@@ -1,41 +1,82 @@
+/// 主窗口侧栏导航与模块路由。
+///
+/// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
+/// 可在 Xcode 中通过 Product → Build Documentation 浏览。
+
 import SwiftUI
 
+/// SidebarItem
+///
+/// `SidebarItem` 类型定义。
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
+    /// heiniu。
+    case heiniu
+    /// learn。
     case learn
+    /// scripts。
     case scripts
+    /// storyboards。
     case storyboards
+    /// assets。
     case assets
+    /// 全局设置仓库环境对象。
     case settings
+    /// 按范围或插件筛选技能
+    ///
+    /// 按范围或插件筛选技能。
+    case skills
+    /// mcp。
+    case mcp
 
+    /// 唯一标识符。
     var id: String { rawValue }
 
+    /// 标题。
     var title: String {
         switch self {
+        case .heiniu: "黑妞"
         case .learn: "学习"
         case .scripts: "剧本"
         case .storyboards: "分镜"
         case .assets: "资产库"
         case .settings: "设置"
+        case .skills: "技能"
+        case .mcp: "MCP"
         }
     }
 
+    /// 用于 UI 的 SF Symbol。
     var systemImage: String {
         switch self {
+        case .heiniu: "sparkles"
         case .learn: "graduationcap"
         case .scripts: "doc.text"
         case .storyboards: "rectangle.split.3x1"
         case .assets: "square.grid.2x2"
         case .settings: "gearshape"
+        case .skills: "bolt.fill"
+        case .mcp: "server.rack"
         }
     }
 
-    static let workspaceItems: [SidebarItem] = [.learn, .scripts, .storyboards, .assets]
-    static let configItems: [SidebarItem] = [.settings]
+    /// workspaceItems。
+    static let workspaceItems: [SidebarItem] = [.heiniu, .learn, .scripts, .storyboards, .assets]
+    /// configItems。
+    static let configItems: [SidebarItem] = [.settings, .skills, .mcp]
 }
 
+/// MainView
+///
+/// `MainView` 类型定义。
 struct MainView: View {
-    @State private var selection: SidebarItem? = .settings
+    @State private var selection: SidebarItem? = .heiniu
 
+    /// currentTitle。
+    private var currentTitle: String {
+        selection?.title ?? "黑妞"
+    }
+
+    /// SwiftUI 视图内容。
     var body: some View {
         NavigationSplitView {
             sidebar
@@ -48,10 +89,13 @@ struct MainView: View {
             detailView
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(AppTheme.bgBase)
+                .navigationTitle(currentTitle)
         }
         .background(AppTheme.bgBase)
+        .navigationTitle(currentTitle)
     }
 
+    /// sidebar。
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
@@ -78,7 +122,9 @@ struct MainView: View {
             List(selection: $selection) {
                 Section {
                     ForEach(SidebarItem.workspaceItems) { item in
-                        sidebarRow(item)
+                        Label(item.title, systemImage: item.systemImage)
+                            .tag(item)
+                            .font(.body)
                     }
                 } header: {
                     Text("工作台")
@@ -88,7 +134,9 @@ struct MainView: View {
 
                 Section {
                     ForEach(SidebarItem.configItems) { item in
-                        sidebarRow(item)
+                        Label(item.title, systemImage: item.systemImage)
+                            .tag(item)
+                            .font(.body)
                     }
                 } header: {
                     Text("配置")
@@ -104,15 +152,12 @@ struct MainView: View {
         .background(AppTheme.bgSidebar)
     }
 
-    private func sidebarRow(_ item: SidebarItem) -> some View {
-        Label(item.title, systemImage: item.systemImage)
-            .tag(item)
-            .font(.body)
-    }
-
+    /// detailView。
     @ViewBuilder
     private var detailView: some View {
         switch selection {
+        case .heiniu, .none:
+            HeiNiuHomeView()
         case .learn:
             PlaceholderView(
                 title: "学习",
@@ -141,8 +186,20 @@ struct MainView: View {
                 message: "管理角色、场景与道具等可复用资产。",
                 badge: "即将推出"
             )
-        case .settings, .none:
+        case .settings:
             SettingsView()
+        case .skills:
+            ScrollView {
+                SkillsSettingsView()
+                    .studioContentWidth()
+                    .padding(28)
+            }
+        case .mcp:
+            ScrollView {
+                MCPSettingsView()
+                    .studioContentWidth()
+                    .padding(28)
+            }
         }
     }
 }
@@ -150,5 +207,6 @@ struct MainView: View {
 #Preview {
     MainView()
         .environment(SettingsStore())
+        .environment(HeiNiuAgentStore())
         .frame(width: 1180, height: 760)
 }
