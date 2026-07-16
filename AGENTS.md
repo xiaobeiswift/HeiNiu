@@ -14,7 +14,7 @@
 ## 架构要点
 
 - 入口：`HeiNiuApp` 注入 `SettingsStore` + `HeiNiuAgentStore`
-- 侧栏：工作台（黑妞/学习/剧本/分镜/资产）+ 配置（设置/技能/MCP）
+- 侧栏：工作台（项目/剧本/分镜/资产）+ 黑妞（可展开列表）+ 配置（设置/技能/MCP）
 - 密钥只进钥匙串；配置进 Application Support JSON
 - 解码一律容错（`decodeIfPresent` + 默认值）
 
@@ -41,6 +41,8 @@
 `~/Library/Application Support/HeiNiu/`
 
 - `settings.json` / `agents.json` / `conversations.json`
+- `projects.json`（立项看板，与会话独立）
+- `Projects/<id>/pipeline.json`（分步流水线产物）
 - `knowledge.json` + `Knowledge/<id>/`
 - `skills.json` / `plugins.json`
 
@@ -55,6 +57,6 @@
 
 ## 明确不做（当前阶段）
 
-- 学习 / 剧本 / 分镜 / 资产库完整业务流水线
+- 项目 / 剧本 / 分镜 / 资产库完整业务流水线
 - App Store 沙盒上架
 - 把 API Key 写入明文 JSON

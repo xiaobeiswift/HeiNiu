@@ -118,8 +118,7 @@ enum LLMStreamEvent: Sendable {
 ///
 /// 实现方：``OpenAICompatibleClient``、``AnthropicClient``。
 ///
-/// 支持一次性 ``complete(messages:model:temperature:reasoningEffort:apiKey:)``
-/// 与流式 ``stream(messages:model:temperature:reasoningEffort:apiKey:)``。
+/// 支持一次性补全与流式补全（见协议方法）。
 ///
 /// - SeeAlso: ``LLMClientFactory``
 ///
@@ -139,7 +138,7 @@ protocol LLMClient: Sendable {
 
     /// 流式补全：边收边产出增量事件，结束时仍可通过累计文本得到完整结果。
     ///
-    /// 默认实现：调用 ``complete`` 后一次性发出 delta（兼容未实现 SSE 的客户端）。
+    /// 默认实现：调用非流式补全后一次性发出 delta（兼容未实现 SSE 的客户端）。
     ///
     func stream(
         messages: [LLMChatMessage],
@@ -151,7 +150,7 @@ protocol LLMClient: Sendable {
 }
 
 extension LLMClient {
-    /// 默认流式：退化为一次 complete，再拆成 reasoning / content 两个事件。
+    /// 默认流式：退化为一次非流式补全，再拆成 reasoning / content 事件。
     func stream(
         messages: [LLMChatMessage],
         model: String,

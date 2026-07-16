@@ -11,7 +11,7 @@ import Foundation
 /// `~/Library/Application Support/HeiNiu/`
 ///
 /// - Important: API Key **不**存放于此目录，而在钥匙串中。
-/// - SeeAlso: ``KeychainHelper``, <doc:DataStorage>
+/// - SeeAlso: ``KeychainHelper``；数据目录约定见文档「DataStorage」。
 enum AppPaths {
     /// Application Support 下的应用根目录。
     static var applicationSupportRoot: URL {
@@ -49,6 +49,26 @@ enum AppPaths {
         applicationSupportRoot.appendingPathComponent("plugins.json", isDirectory: false)
     }
 
+    /// 短剧项目列表（立项看板，v1 不含集数实体）。
+    static var projectsFileURL: URL {
+        applicationSupportRoot.appendingPathComponent("projects.json", isDirectory: false)
+    }
+
+    /// 各项目工作区根目录（流水线产物、素材等）。
+    static var projectsRoot: URL {
+        applicationSupportRoot.appendingPathComponent("Projects", isDirectory: true)
+    }
+
+    /// 指定项目的工作目录。
+    static func projectDirectory(for projectID: UUID) -> URL {
+        projectsRoot.appendingPathComponent(projectID.uuidString, isDirectory: true)
+    }
+
+    /// 项目流水线状态文件。
+    static func projectPipelineFileURL(for projectID: UUID) -> URL {
+        projectDirectory(for: projectID).appendingPathComponent("pipeline.json", isDirectory: false)
+    }
+
     /// 知识库原文件根目录。
     static var knowledgeRoot: URL {
         applicationSupportRoot.appendingPathComponent("Knowledge", isDirectory: true)
@@ -64,11 +84,19 @@ enum AppPaths {
     /// 确保 Application Support 根目录与知识库根目录存在。
     static func ensureDirectories() {
         let fm = FileManager.default
-        for url in [applicationSupportRoot, knowledgeRoot] {
+        for url in [applicationSupportRoot, knowledgeRoot, projectsRoot] {
             if !fm.fileExists(atPath: url.path) {
                 try? fm.createDirectory(at: url, withIntermediateDirectories: true)
             }
         }
+    }
+
+    /// 确保某项目工作目录存在。
+    @discardableResult
+    static func ensureProjectDirectory(for projectID: UUID) -> URL {
+        let dir = projectDirectory(for: projectID)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
     }
 
     /// 确保某黑妞的知识库目录存在并返回。

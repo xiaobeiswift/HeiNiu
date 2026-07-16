@@ -22,6 +22,7 @@ struct HeiNiuChatView: View {
 
     @State private var input = ""
     @State private var isSending = false
+    @State private var isTranslating = false
     @State private var errorMessage: String?
     @State private var attachments: [ChatAttachment] = []
     @State private var activeSkillIDs: Set<UUID> = []
@@ -361,9 +362,11 @@ struct HeiNiuChatView: View {
         return "\(provider) · \(model)"
     }
 
-    /// 输入区右侧展示的模型名（仅模型，不带服务商）。
-    private var composerModelLabel: String {
-        agent.model.isEmpty ? "未选模型" : agent.model
+    /// 输入区是否可点「译英」。
+    private var canTranslate: Bool {
+        !isSending
+            && !isTranslating
+            && !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     // MARK: - Chat
@@ -375,7 +378,7 @@ struct HeiNiuChatView: View {
             ChatTranscriptView(
                 messages: conversation?.messages ?? [],
                 isSending: isSending,
-                accent: agent.accentColor,
+                agent: agent,
                 conversationID: conversationID,
                 emptySubtitle: agent.subtitle,
                 starters: agent.conversationStarters,
@@ -459,14 +462,33 @@ struct HeiNiuChatView: View {
 
                     Spacer(minLength: 6)
 
-                    // 模型名 + 仅环形容量指示（无百分比/胶囊底，省横向空间）
-                    Text(composerModelLabel)
-                        .font(.caption2)
-                        .foregroundStyle(AppTheme.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: 140, alignment: .trailing)
-                        .help(composerModelLabel)
+                    // 译英：把输入框原文翻成英文，写回输入框（不进会话）
+                    Button {
+                        Task { await translateInputToEnglish() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if isTranslating {
+                                ProgressView().controlSize(.mini)
+                            } else {
+                                Image(systemName: "globe")
+                                    .font(.caption)
+                            }
+                            Text(isTranslating ? "翻译中" : "译英")
+                                .font(.caption.weight(.medium))
+                        }
+                        .foregroundStyle(canTranslate || isTranslating ? AppTheme.textSecondary : AppTheme.textTertiary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(AppTheme.bgCard.opacity(0.55), in: Capsule())
+                        .overlay(Capsule().stroke(AppTheme.stroke, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!canTranslate)
+                    .help(
+                        settings.hasTranslationModelConfigured
+                            ? "将输入框译成英文（全局翻译模型）"
+                            : "将输入框译成英文（未配置全局翻译模型，使用当前黑妞模型）"
+                    )
 
                     Button {
                         showContextDetail.toggle()
@@ -940,6 +962,28 @@ struct HeiNiuChatView: View {
         store.updateAgent(updated)
     }
 
+    /// 将输入框内容翻译为英文并写回（不发送、不入会话）。
+    private func translateInputToEnglish() async {
+        let source = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty, !isTranslating, !isSending else { return }
+
+        isTranslating = true
+        errorMessage = nil
+        defer { isTranslating = false }
+
+        do {
+            let translated = try await store.translateToEnglish(
+                source,
+                agent: agent,
+                settings: settings
+            )
+            input = translated
+            inputFocused = true
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     /// pickFiles
     ///
     /// 执行 `pickFiles` 相关逻辑。
@@ -1232,18 +1276,23 @@ struct HeiNiuChatView: View {
 private struct ChatTranscriptView: View, Equatable {
     let messages: [ChatTurn]
     let isSending: Bool
-    let accent: Color
+    let agent: HeiNiuAgent
     let conversationID: UUID?
     let emptySubtitle: String
     let starters: [String]
     let onPickStarter: (String) -> Void
     @Binding var lastAutoScrollAt: Date
 
+    private var accent: Color { agent.accentColor }
+
     static func == (lhs: ChatTranscriptView, rhs: ChatTranscriptView) -> Bool {
         // 避免对整段剧本做深比较（会拖慢输入框每一次击键）
         guard lhs.isSending == rhs.isSending,
               lhs.conversationID == rhs.conversationID,
-              lhs.accent == rhs.accent,
+              lhs.agent.id == rhs.agent.id,
+              lhs.agent.accentHue == rhs.agent.accentHue,
+              lhs.agent.model == rhs.agent.model,
+              lhs.agent.providerID == rhs.agent.providerID,
               lhs.emptySubtitle == rhs.emptySubtitle,
               lhs.starters == rhs.starters,
               lhs.messages.count == rhs.messages.count
@@ -1322,7 +1371,8 @@ private struct ChatTranscriptView: View, Equatable {
             && message.id == messages.last?.id
         return MessageBubble(
             message: message,
-            accent: accent,
+            agent: agent,
+            conversationID: conversationID,
             isStreaming: streaming
         )
         .id(message.id)
@@ -1419,12 +1469,17 @@ private struct ChatTranscriptView: View, Equatable {
 
 /// MessageBubble
 ///
-/// 恢复圆角对话气泡样式；长文仍默认折叠，避免再把滚动拖垮。
+/// 圆角对话气泡；长文默认折叠。底栏提供复制 / 自动翻译。
 private struct MessageBubble: View, Equatable {
+    @Environment(HeiNiuAgentStore.self) private var store
+    @Environment(SettingsStore.self) private var settings
+
     /// message。
     let message: ChatTurn
-    /// accent。
-    let accent: Color
+    /// 当前黑妞（翻译回退模型）。
+    let agent: HeiNiuAgent
+    /// 所属会话（写回译文）。
+    let conversationID: UUID?
     /// 是否处于流式输出中（最后一条助手消息）。
     var isStreaming: Bool = false
 
@@ -1435,6 +1490,8 @@ private struct MessageBubble: View, Equatable {
 
     @State private var reasoningExpanded = false
     @State private var bodyExpanded = false
+    @State private var isTranslating = false
+    @State private var actionHint: String?
 
     static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
         lhs.message.id == rhs.message.id
@@ -1442,9 +1499,12 @@ private struct MessageBubble: View, Equatable {
             && lhs.message.content == rhs.message.content
             && lhs.message.reasoning == rhs.message.reasoning
             && lhs.isStreaming == rhs.isStreaming
-            && lhs.accent == rhs.accent
+            && lhs.agent.id == rhs.agent.id
+            && lhs.agent.accentHue == rhs.agent.accentHue
+            && lhs.conversationID == rhs.conversationID
     }
 
+    private var accent: Color { agent.accentColor }
     private var isUser: Bool { message.role == .user }
 
     private var shouldOfferCollapse: Bool {
@@ -1458,6 +1518,8 @@ private struct MessageBubble: View, Equatable {
             || isStreaming
             || message.content.count >= 80
             || message.content.contains("\n")
+            || isTranslating
+            || actionHint != nil
     }
 
     private var showsFullBody: Bool {
@@ -1474,18 +1536,37 @@ private struct MessageBubble: View, Equatable {
         return prefix + "…"
     }
 
+    private var canAct: Bool {
+        !isStreaming
+            && !isTranslating
+            && !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var translateButtonTitle: String {
+        if isTranslating { return "翻译中" }
+        switch HeiNiuAgentStore.inferredDirection(for: message.content) {
+        case .toEnglish: return "译英"
+        case .toChinese: return "译中"
+        case .auto: return "翻译"
+        }
+    }
+
     var body: some View {
         // 与 git 历史一致：HStack + 两侧 Spacer 负责左右贴边
         HStack(alignment: .top, spacing: 0) {
             if isUser { Spacer(minLength: 60) }
 
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 8) {
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
                 if !isUser, message.hasReasoning {
                     reasoningBlock
                 }
 
                 if !message.content.isEmpty {
                     contentBubble
+                    // 操作条放在气泡外，避免短消息被 Spacer 撑成宽条
+                    if !isStreaming {
+                        externalActionBar
+                    }
                 } else if isStreaming && !isUser {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
@@ -1518,6 +1599,9 @@ private struct MessageBubble: View, Equatable {
                 reasoningExpanded = false
             }
         }
+        .onChange(of: message.content) { _, _ in
+            if !isTranslating { actionHint = nil }
+        }
         .onAppear {
             if isStreaming {
                 bodyExpanded = true
@@ -1526,8 +1610,6 @@ private struct MessageBubble: View, Equatable {
     }
 
     private var contentBubble: some View {
-        // 短消息：完全贴合文字（历史行为）
-        // 长消息：固定 bubbleMaxWidth，折叠/展开同宽
         Group {
             if usesUniformBubbleWidth {
                 longContentBubble
@@ -1536,11 +1618,15 @@ private struct MessageBubble: View, Equatable {
             }
         }
         .contextMenu {
-            Button("复制") { copyToPasteboard(message.content) }
+            Button("复制") { copyMessage() }
+            Button(translateButtonTitle) {
+                Task { await translateMessage() }
+            }
+            .disabled(!canAct || conversationID == nil)
         }
     }
 
-    /// 「继续」等短气泡：不要 maxWidth，否则在 HStack 里会被父布局撑开。
+    /// 「继续」等短气泡：只包文字，贴合内容宽度。
     private var shortContentBubble: some View {
         Text(displayBody)
             .font(.body)
@@ -1558,7 +1644,7 @@ private struct MessageBubble: View, Equatable {
             )
     }
 
-    /// 长剧本：统一宽度，折叠态与展开态一致。
+    /// 长剧本：统一宽度；展开链接放在气泡内左下，复制/翻译在气泡外。
     private var longContentBubble: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(displayBody)
@@ -1589,6 +1675,110 @@ private struct MessageBubble: View, Equatable {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(isUser ? Color.clear : AppTheme.stroke, lineWidth: 1)
         )
+    }
+
+    /// 气泡下方操作：不进气泡，不改变气泡宽度。
+    private var externalActionBar: some View {
+        HStack(spacing: 8) {
+            if let actionHint {
+                Text(actionHint)
+                    .font(.caption2)
+                    .foregroundStyle(
+                        actionHint.contains("失败") ? AppTheme.danger : AppTheme.textTertiary
+                    )
+                    .lineLimit(1)
+            }
+
+            bubbleTextButton(
+                title: "复制",
+                systemImage: "doc.on.doc",
+                help: "复制全文",
+                disabled: !canAct
+            ) {
+                copyMessage()
+            }
+
+            bubbleTextButton(
+                title: translateButtonTitle,
+                systemImage: "globe",
+                help: "根据原文自动中译英或英译中，写回本条消息",
+                disabled: !canAct || conversationID == nil,
+                showsProgress: isTranslating
+            ) {
+                Task { await translateMessage() }
+            }
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private func bubbleTextButton(
+        title: String,
+        systemImage: String,
+        help: String,
+        disabled: Bool,
+        showsProgress: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                if showsProgress {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.caption2.weight(.semibold))
+                }
+                Text(title)
+                    .font(.caption2.weight(.medium))
+            }
+            .foregroundStyle(disabled ? AppTheme.textTertiary : AppTheme.textSecondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(AppTheme.bgCard.opacity(0.7), in: Capsule())
+            .overlay(Capsule().stroke(AppTheme.stroke.opacity(0.8), lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .help(help)
+    }
+
+    private func copyMessage() {
+        copyToPasteboard(message.content)
+        actionHint = "已复制"
+        Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            if actionHint == "已复制" { actionHint = nil }
+        }
+    }
+
+    private func translateMessage() async {
+        guard canAct, let conversationID else { return }
+        isTranslating = true
+        actionHint = nil
+        defer { isTranslating = false }
+
+        do {
+            let translated = try await store.translate(
+                message.content,
+                direction: .auto,
+                agent: agent,
+                settings: settings
+            )
+            store.replaceMessageContent(
+                conversationID: conversationID,
+                messageID: message.id,
+                content: translated
+            )
+            // 译文可能很长，保持展开方便阅读
+            if translated.count >= Self.collapseThreshold {
+                bodyExpanded = true
+            }
+            actionHint = "已翻译"
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            if actionHint == "已翻译" { actionHint = nil }
+        } catch {
+            actionHint = "翻译失败"
+        }
     }
 
     private var reasoningBlock: some View {

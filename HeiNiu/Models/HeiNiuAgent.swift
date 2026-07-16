@@ -14,7 +14,7 @@ import SwiftUI
 ///
 /// - **指令与模型分离**：`instructions` 管人设；`providerID`/`model` 管算力。
 /// - **技能白名单**：`enabledSkillIDs` 为空表示全部技能可用。
-/// - **MCP 策略**：见 ``mcpMode`` 与 ``enabledMCPServerIDs``。
+/// - **MCP 策略**：见 ``mcpMode`` 与 ``HeiNiuAgent/enabledMCPServerIDs``。
 ///
 /// ## 示例
 ///
@@ -343,7 +343,7 @@ enum ReasoningEffort: String, Codable, CaseIterable, Identifiable, Hashable {
 ///
 /// - ``disabled``：不使用 MCP
 /// - ``automatic``：使用全局已启用服务器
-/// - ``manual``：仅 ``enabledMCPServerIDs``
+/// - ``manual``：仅 ``HeiNiuAgent/enabledMCPServerIDs`` 勾选列表
 ///
 /// UI 上以三张卡片呈现（禁用 / 自动 / 手动）。
 enum AgentMCPMode: String, Codable, CaseIterable, Identifiable, Hashable {

@@ -150,7 +150,8 @@ final class HeiNiuAgentStore {
 
     /// 新建黑妞并立即写入 `agents.json`。
     ///
-    /// 同时创建知识库目录与默认指令。新建后需绑定 `providerID`/`model` 才能 ``send``。
+    /// 同时创建知识库目录与默认指令。新建后需绑定 `providerID`/`model` 才能
+    /// ``HeiNiuAgentStore/send(package:conversationID:settings:activeSkillIDs:)``。
     ///
     /// - Parameter name: 显示名，默认「新黑妞」。
     /// - Returns: 新建的 ``HeiNiuAgent``。
@@ -224,7 +225,7 @@ final class HeiNiuAgentStore {
         copy.createdAt = Date()
         copy.updatedAt = Date()
         agents.append(copy)
-        AppPaths.ensureKnowledgeDirectory(for: copy.id)
+        _ = AppPaths.ensureKnowledgeDirectory(for: copy.id)
         // 复制知识库元数据与文本（不强制拷贝原文件）
         for item in knowledge(for: source.id) {
             var k = item
@@ -637,6 +638,149 @@ final class HeiNiuAgentStore {
         return TextExtractor.truncate(lines.joined(separator: "\n"), max: maxCharacters)
     }
 
+    // MARK: - Translate
+
+    /// 翻译方向。
+    enum TranslateDirection: Hashable, Sendable {
+        /// 译成英文。
+        case toEnglish
+        /// 译成中文。
+        case toChinese
+        /// 按正文自动判断：偏中文 → 英；否则 → 中。
+        case auto
+    }
+
+    /// 将文本翻译（不写会话）。
+    ///
+    /// 优先全局翻译模型；未配置时回退黑妞模型。`reasoningEffort = none`。
+    ///
+    /// - Parameters:
+    ///   - text: 原文。
+    ///   - direction: 方向；`TranslateDirection.auto` 时按汉字占比判断。
+    ///   - agent: 回退用黑妞。
+    ///   - settings: API Key / 全局翻译配置。
+    /// - Returns: 译文。
+    func translate(
+        _ text: String,
+        direction: TranslateDirection = .auto,
+        agent: HeiNiuAgent,
+        settings: SettingsStore
+    ) async throws -> String {
+        let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty else { return "" }
+
+        guard let target = settings.resolveTranslationTarget(fallbackAgent: agent) else {
+            throw LLMError.missingProvider
+        }
+        let provider = target.provider
+        let model = target.model
+
+        let apiKey = settings.apiKey(for: provider.id)
+        guard !apiKey.isEmpty else { throw LLMError.missingAPIKey }
+
+        let resolved: TranslateDirection = {
+            switch direction {
+            case .auto: return Self.inferredDirection(for: source)
+            case .toEnglish, .toChinese: return direction
+            }
+        }()
+
+        let system: String = {
+            switch resolved {
+            case .toEnglish:
+                return """
+                You are a precise translator for a short-drama writing workbench.
+                Translate the user's text into natural, fluent English.
+                Rules:
+                - Output English translation only.
+                - Preserve meaning, tone, line breaks, and markdown structure.
+                - Keep proper names when appropriate; do not add explanations.
+                - If the text is already English, lightly polish and return it.
+                """
+            case .toChinese:
+                return """
+                你是短剧创作工作台的精准翻译。
+                将用户文本译为自然流畅的简体中文。
+                规则：
+                - 只输出中文译文，不要解释。
+                - 保留语气、换行与 Markdown 结构。
+                - 专有名词可酌情保留原文。
+                - 若原文已是中文，可轻度润色后返回。
+                """
+            case .auto:
+                // 已在上方 resolve
+                return ""
+            }
+        }()
+
+        let client = LLMClientFactory.make(for: provider)
+        let messages: [LLMChatMessage] = [
+            LLMChatMessage(role: .system, content: system),
+            LLMChatMessage(role: .user, content: source),
+        ]
+
+        let completion = try await client.complete(
+            messages: messages,
+            model: model,
+            temperature: min(agent.temperature, 0.4),
+            reasoningEffort: .none,
+            apiKey: apiKey
+        )
+        let translated = completion.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !translated.isEmpty else { throw LLMError.emptyResponse }
+        return translated
+    }
+
+    /// 输入框「译英」便捷入口。
+    func translateToEnglish(
+        _ text: String,
+        agent: HeiNiuAgent,
+        settings: SettingsStore
+    ) async throws -> String {
+        try await translate(text, direction: .toEnglish, agent: agent, settings: settings)
+    }
+
+    /// 按汉字/假名等 CJK 占比推断翻译方向。
+    static func inferredDirection(for text: String) -> TranslateDirection {
+        var cjk = 0
+        var latin = 0
+        for scalar in text.unicodeScalars {
+            if CharacterSet.letters.contains(scalar) {
+                // CJK Unified + 扩展、假名、韩文
+                if (0x4E00...0x9FFF).contains(scalar.value)
+                    || (0x3400...0x4DBF).contains(scalar.value)
+                    || (0x3040...0x30FF).contains(scalar.value)
+                    || (0xAC00...0xD7AF).contains(scalar.value)
+                    || (0xF900...0xFAFF).contains(scalar.value) {
+                    cjk += 1
+                } else if (0x0041...0x005A).contains(scalar.value)
+                    || (0x0061...0x007A).contains(scalar.value) {
+                    latin += 1
+                }
+            }
+        }
+        // 明显偏中文 → 英；否则默认中译方向（含中英混排英文为主）
+        if cjk > 0, cjk >= latin {
+            return .toEnglish
+        }
+        return .toChinese
+    }
+
+    /// 原地替换某条消息正文（用于气泡内翻译结果写回）。
+    func replaceMessageContent(
+        conversationID: UUID,
+        messageID: UUID,
+        content: String
+    ) {
+        guard var conversation = conversation(id: conversationID),
+              let index = conversation.messages.firstIndex(where: { $0.id == messageID })
+        else { return }
+        conversation.messages[index].content = content
+        // 翻译后清掉旧思考过程，避免中英错位
+        conversation.messages[index].reasoning = nil
+        updateConversation(conversation)
+    }
+
     // MARK: - Send
 
     /// 发送消息包：分离 UI 展示与模型真实输入。
@@ -645,7 +789,8 @@ final class HeiNiuAgentStore {
     /// - `modelUserText`：发给模型的完整用户内容（模板/附件/会话）  
     /// - `skillCommands`：本轮命令名列表  
     ///
-    /// 由 ``HeiNiuChatView`` 组装后交给 ``send(package:conversationID:settings:activeSkillIDs:)``。
+    /// 由 ``HeiNiuChatView`` 组装后交给
+    /// ``HeiNiuAgentStore/send(package:conversationID:settings:activeSkillIDs:)``。
     ///
     struct SendPackage {
         var displayText: String

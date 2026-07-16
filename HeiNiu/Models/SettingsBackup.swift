@@ -28,6 +28,10 @@ struct SettingsBackup: Codable {
     var videoProviders: [VideoProvider]
     /// 全局 MCP 服务器列表。
     var mcpServers: [MCPServer]
+    /// 全局翻译服务商。
+    var translationProviderID: UUID?
+    /// 全局翻译模型。
+    var translationModel: String
 
     /// Key 仅在 includeAPIKeys == true 时写入；键为 provider UUID 字符串
     var llmAPIKeys: [String: String]
@@ -51,6 +55,8 @@ struct SettingsBackup: Codable {
         imageProviders: [ImageProvider],
         videoProviders: [VideoProvider],
         mcpServers: [MCPServer] = [],
+        translationProviderID: UUID? = nil,
+        translationModel: String = "",
         llmAPIKeys: [String: String] = [:],
         imageAPIKeys: [String: String] = [:],
         videoAPIKeys: [String: String] = [:]
@@ -64,6 +70,8 @@ struct SettingsBackup: Codable {
         self.imageProviders = imageProviders
         self.videoProviders = videoProviders
         self.mcpServers = mcpServers
+        self.translationProviderID = translationProviderID
+        self.translationModel = translationModel
         self.llmAPIKeys = llmAPIKeys
         self.imageAPIKeys = imageAPIKeys
         self.videoAPIKeys = videoAPIKeys
@@ -83,6 +91,8 @@ struct SettingsBackup: Codable {
         imageProviders = try container.decodeIfPresent([ImageProvider].self, forKey: .imageProviders) ?? []
         videoProviders = try container.decodeIfPresent([VideoProvider].self, forKey: .videoProviders) ?? []
         mcpServers = try container.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
+        translationProviderID = try container.decodeIfPresent(UUID.self, forKey: .translationProviderID)
+        translationModel = try container.decodeIfPresent(String.self, forKey: .translationModel) ?? ""
         llmAPIKeys = try container.decodeIfPresent([String: String].self, forKey: .llmAPIKeys) ?? [:]
         imageAPIKeys = try container.decodeIfPresent([String: String].self, forKey: .imageAPIKeys) ?? [:]
         videoAPIKeys = try container.decodeIfPresent([String: String].self, forKey: .videoAPIKeys) ?? [:]
@@ -98,6 +108,7 @@ struct SettingsBackup: Codable {
         ///
         /// LLM 服务商列表。
         case providers, promptItems, imageProviders, videoProviders, mcpServers
+        case translationProviderID, translationModel
         /// LLM Key 字典。
         case llmAPIKeys, imageAPIKeys, videoAPIKeys
     }

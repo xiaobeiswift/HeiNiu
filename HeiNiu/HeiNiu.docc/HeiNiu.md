@@ -1,6 +1,6 @@
-# ``HeiNiu``
+# 黑妞短剧
 
-黑妞短剧：面向短剧创作者的 macOS 工作台。
+面向短剧创作者的 macOS 工作台。
 
 @Metadata {
     @TechnologyRoot
