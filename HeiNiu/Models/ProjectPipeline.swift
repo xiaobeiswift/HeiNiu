@@ -81,13 +81,13 @@ enum PipelineStepKind: String, Codable, CaseIterable, Identifiable, Hashable, Se
 }
 
 /// 单步运行状态。
-enum PipelineStepStatus: String, Codable, Hashable {
+enum PipelineStepStatus: String, Codable, Hashable, Sendable {
     case idle
     case running
     case done
     case failed
 
-    var title: String {
+    nonisolated var title: String {
         switch self {
         case .idle: "未开始"
         case .running: "进行中"
@@ -98,7 +98,9 @@ enum PipelineStepStatus: String, Codable, Hashable {
 }
 
 /// 流水线中的一步。
-struct PipelineStep: Identifiable, Codable, Hashable {
+///
+/// 纯值类型，可在后台拼装提示词时安全读取（不受默认 MainActor isolation 限制）。
+nonisolated struct PipelineStep: Identifiable, Codable, Hashable, Sendable {
     /// 与 ``kind`` 一致，便于稳定身份。
     var id: PipelineStepKind { kind }
     /// 步骤类型。
@@ -145,13 +147,21 @@ struct PipelineStep: Identifiable, Codable, Hashable {
 }
 
 /// 某项目的完整流水线快照。
-struct ProjectPipeline: Codable, Hashable {
+///
+/// 纯值类型，可在后台拼装提示词时安全读取。
+nonisolated struct ProjectPipeline: Codable, Hashable, Sendable {
     /// 所属项目。
     var projectID: UUID
     /// 有序步骤（与 ``PipelineStepKind/allCases`` 对齐）。
     var steps: [PipelineStep]
     /// 当前聚焦步骤。
     var currentKind: PipelineStepKind
+    /// 剧本步骤：用户输入 / 源文本草稿（离开项目后应能恢复）。
+    var scriptInput: String
+    /// 剧本步骤：选中的提示词库条目。
+    var selectedScriptPromptID: UUID?
+    /// 剧本步骤：最近导入的文件名（仅展示）。
+    var importedFileName: String?
     /// 最近更新。
     var updatedAt: Date
 
@@ -159,6 +169,9 @@ struct ProjectPipeline: Codable, Hashable {
         self.projectID = projectID
         self.steps = PipelineStepKind.allCases.map { PipelineStep(kind: $0) }
         self.currentKind = .script
+        self.scriptInput = ""
+        self.selectedScriptPromptID = nil
+        self.importedFileName = nil
         self.updatedAt = Date()
     }
 
@@ -170,11 +183,14 @@ struct ProjectPipeline: Codable, Hashable {
         var map = Dictionary(uniqueKeysWithValues: decoded.map { ($0.kind, $0) })
         steps = PipelineStepKind.allCases.map { map[$0] ?? PipelineStep(kind: $0) }
         currentKind = try c.decodeIfPresent(PipelineStepKind.self, forKey: .currentKind) ?? .script
+        scriptInput = try c.decodeIfPresent(String.self, forKey: .scriptInput) ?? ""
+        selectedScriptPromptID = try c.decodeIfPresent(UUID.self, forKey: .selectedScriptPromptID)
+        importedFileName = try c.decodeIfPresent(String.self, forKey: .importedFileName)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 
     private enum CodingKeys: String, CodingKey {
-        case projectID, steps, currentKind, updatedAt
+        case projectID, steps, currentKind, scriptInput, selectedScriptPromptID, importedFileName, updatedAt
     }
 
     func step(_ kind: PipelineStepKind) -> PipelineStep {
@@ -185,6 +201,30 @@ struct ProjectPipeline: Codable, Hashable {
         guard let i = steps.firstIndex(where: { $0.kind == kind }) else { return }
         mutate(&steps[i])
         steps[i].updatedAt = Date()
+        updatedAt = Date()
+    }
+
+    /// 同步剧本编辑草稿（输入框 / 提示词选择 / 导入文件名）。
+    mutating func updateScriptDraft(
+        input: String? = nil,
+        promptID: UUID? = nil,
+        clearPromptID: Bool = false,
+        importedFileName: String? = nil,
+        clearImportedFileName: Bool = false
+    ) {
+        if let input {
+            scriptInput = input
+        }
+        if clearPromptID {
+            selectedScriptPromptID = nil
+        } else if let promptID {
+            selectedScriptPromptID = promptID
+        }
+        if clearImportedFileName {
+            self.importedFileName = nil
+        } else if let importedFileName {
+            self.importedFileName = importedFileName
+        }
         updatedAt = Date()
     }
 

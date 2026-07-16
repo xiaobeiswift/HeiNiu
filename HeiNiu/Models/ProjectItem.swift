@@ -57,7 +57,7 @@ enum ProjectStatus: String, Codable, CaseIterable, Identifiable, Hashable {
 ///
 /// 持久化：`projects.json`（见 ``AppPaths/projectsFileURL``）。
 ///
-struct ProjectItem: Identifiable, Codable, Hashable {
+nonisolated struct ProjectItem: Identifiable, Codable, Hashable, Sendable {
     /// 唯一标识。
     var id: UUID
     /// 项目名称。
@@ -163,17 +163,27 @@ struct ProjectItem: Identifiable, Codable, Hashable {
 
     /// 相对时间（如「18 小时前」）。
     var relativeUpdatedText: String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        formatter.locale = Locale(identifier: "zh_CN")
-        return formatter.localizedString(for: updatedAt, relativeTo: Date())
+        Self.relativeFormatter.localizedString(for: updatedAt, relativeTo: Date())
     }
 
     /// 卡片标题旁的本地时间戳。
     var cardTimestampText: String {
+        Self.cardTimestampFormatter.string(from: updatedAt)
+    }
+
+    /// 复用格式化器，避免卡片网格每次 body 都 new DateFormatter。
+    /// Foundation 的 Formatter 不是 Sendable，这里仅作只读缓存。
+    nonisolated(unsafe) private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .full
+        f.locale = Locale(identifier: "zh_CN")
+        return f
+    }()
+
+    nonisolated(unsafe) private static let cardTimestampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "zh_CN")
         f.dateFormat = "MM/dd HH:mm"
-        return f.string(from: updatedAt)
-    }
+        return f
+    }()
 }

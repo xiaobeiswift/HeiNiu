@@ -6,12 +6,14 @@
 import Foundation
 
 /// 将 `{{key}}` 替换为上下文值；未知键替换为空串。
+///
+/// 默认 MainActor isolation 下仍标 `nonisolated`，便于在后台拼超长提示词。
 enum PromptTemplate {
     /// - Parameters:
     ///   - template: 含 `{{var}}` 的模板。
     ///   - values: 变量表。
     /// - Returns: 替换后的文本。
-    static func render(_ template: String, values: [String: String]) -> String {
+    nonisolated static func render(_ template: String, values: [String: String]) -> String {
         var result = template
         // 先替换已知键
         for (key, value) in values {
@@ -27,7 +29,7 @@ enum PromptTemplate {
     }
 
     /// 从项目 + 流水线已有产物组装常用变量。
-    static func context(
+    nonisolated static func context(
         project: ProjectItem,
         pipeline: ProjectPipeline
     ) -> [String: String] {

@@ -5,6 +5,19 @@
 
 import Foundation
 
+/// 单步运行时的可选覆盖参数。
+struct PipelineStepOptions: Sendable {
+    /// 用户额外输入 / 源文本（会注入 `{{source}}` / `{{brief}}` 补充）。
+    var userInput: String = ""
+    /// 指定提示词库条目；`nil` 时按分类取第一条。
+    var promptItemID: UUID? = nil
+
+    init(userInput: String = "", promptItemID: UUID? = nil) {
+        self.userInput = userInput
+        self.promptItemID = promptItemID
+    }
+}
+
 /// 执行单步流水线。
 enum ProjectPipelineRunner {
     /// 运行指定步骤，返回更新后的 pipeline。
@@ -13,7 +26,8 @@ enum ProjectPipelineRunner {
         step kind: PipelineStepKind,
         project: ProjectItem,
         pipeline: ProjectPipeline,
-        settings: SettingsStore
+        settings: SettingsStore,
+        options: PipelineStepOptions = .init()
     ) async throws -> ProjectPipeline {
         var pipe = pipeline
         pipe.currentKind = kind
@@ -34,7 +48,8 @@ enum ProjectPipelineRunner {
                 kind,
                 project: project,
                 pipeline: pipe,
-                settings: settings
+                settings: settings,
+                options: options
             )
             pipe.updateStep(kind) { step in
                 step.status = .done
@@ -47,7 +62,6 @@ enum ProjectPipelineRunner {
                 step.status = .failed
                 step.errorMessage = error.localizedDescription
             }
-            // 仍返回 pipe，由调用方保存失败状态
             throw PipelineRunError(pipeline: pipe, underlying: error)
         }
     }
@@ -67,7 +81,6 @@ enum ProjectPipelineRunner {
                 throw PipelineError.needPrerequisite(.script)
             }
         case .characters, .scenes, .items:
-            // 分段更佳；若无分段也允许直接基于剧本
             guard pipeline.step(.script).status == .done else {
                 throw PipelineError.needPrerequisite(.script)
             }
@@ -76,7 +89,6 @@ enum ProjectPipelineRunner {
                 throw PipelineError.needExtraction
             }
         case .shotPrompts:
-            // 图片未接前：有分段 + 人物即可先写提示词
             guard pipeline.step(.segment).status == .done else {
                 throw PipelineError.needPrerequisite(.segment)
             }
@@ -94,18 +106,37 @@ enum ProjectPipelineRunner {
         _ kind: PipelineStepKind,
         project: ProjectItem,
         pipeline: ProjectPipeline,
-        settings: SettingsStore
+        settings: SettingsStore,
+        options: PipelineStepOptions
     ) async throws -> String {
+        let selectedPrompt = resolvePromptItem(kind: kind, settings: settings, preferredID: options.promptItemID)
         let (provider, model, temperature) = try resolveLLM(
             kind: kind,
-            settings: settings
+            settings: settings,
+            promptItem: selectedPrompt
         )
         let apiKey = settings.apiKey(for: provider.id)
         guard !apiKey.isEmpty else { throw LLMError.missingAPIKey }
 
-        let values = PromptTemplate.context(project: project, pipeline: pipeline)
-        let userPrompt = buildUserPrompt(kind: kind, settings: settings, values: values)
+        // 模板渲染可能涉及超长 source/template：放到后台，避免卡住「生成中」按钮
+        let template = selectedPrompt?.template ?? ""
+        let fallback = fallbackTemplate(kind)
         let system = buildSystemPrompt(kind: kind)
+        let userPrompt = await Task.detached(priority: .userInitiated) {
+            var values = PromptTemplate.context(project: project, pipeline: pipeline)
+            let userExtra = options.userInput.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !userExtra.isEmpty {
+                values["source"] = userExtra
+                let existingBrief = values["brief"] ?? ""
+                values["brief"] = [existingBrief, "用户补充/源文本：\n\(userExtra)"]
+                    .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                    .joined(separator: "\n\n")
+            }
+            if !template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return PromptTemplate.render(template, values: values)
+            }
+            return PromptTemplate.render(fallback, values: values)
+        }.value
 
         let client = LLMClientFactory.make(for: provider)
         let completion = try await client.complete(
@@ -124,25 +155,38 @@ enum ProjectPipelineRunner {
     }
 
     @MainActor
+    private static func resolvePromptItem(
+        kind: PipelineStepKind,
+        settings: SettingsStore,
+        preferredID: UUID?
+    ) -> PromptItem? {
+        let category = promptCategory(for: kind)
+        if let preferredID,
+           let item = settings.promptItem(id: preferredID),
+           item.category == category {
+            return item
+        }
+        return settings.prompts(in: category).first
+    }
+
+    @MainActor
     private static func resolveLLM(
         kind: PipelineStepKind,
-        settings: SettingsStore
+        settings: SettingsStore,
+        promptItem: PromptItem?
     ) throws -> (LLMProvider, String, Double) {
-        // 优先：提示词库中对应分类的第一条已绑定模型
-        let category = promptCategory(for: kind)
-        if let item = settings.prompts(in: category).first,
+        if let item = promptItem,
            let pid = item.providerID,
            let provider = settings.provider(id: pid),
            !item.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return (provider, item.model, item.temperature)
         }
-        // 回退：第一家 LLM 服务商的第一个模型
         guard let provider = settings.providers.first else {
             throw LLMError.missingProvider
         }
         let model = provider.models.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !model.isEmpty else { throw LLMError.missingModel }
-        return (provider, model, 0.8)
+        return (provider, model, promptItem?.temperature ?? 0.8)
     }
 
     private static func promptCategory(for kind: PipelineStepKind) -> PromptCategory {
@@ -162,10 +206,14 @@ enum ProjectPipelineRunner {
     private static func buildUserPrompt(
         kind: PipelineStepKind,
         settings: SettingsStore,
-        values: [String: String]
+        values: [String: String],
+        promptItem: PromptItem?
     ) -> String {
+        if let template = promptItem?.template,
+           !template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return PromptTemplate.render(template, values: values)
+        }
         let category = promptCategory(for: kind)
-        // 优先用内置/用户提示词库模板
         if let template = settings.prompts(in: category).first?.template,
            !template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return PromptTemplate.render(template, values: values)
@@ -173,7 +221,7 @@ enum ProjectPipelineRunner {
         return PromptTemplate.render(fallbackTemplate(kind), values: values)
     }
 
-    private static func buildSystemPrompt(kind: PipelineStepKind) -> String {
+    nonisolated private static func buildSystemPrompt(kind: PipelineStepKind) -> String {
         switch kind {
         case .script:
             return "你是竖屏短剧编剧。只输出可拍的剧本正文，不要前言后语。"
@@ -192,15 +240,18 @@ enum ProjectPipelineRunner {
         }
     }
 
-    private static func fallbackTemplate(_ kind: PipelineStepKind) -> String {
+    nonisolated private static func fallbackTemplate(_ kind: PipelineStepKind) -> String {
         switch kind {
         case .script:
             return """
-            根据以下创作简报，写一部适合竖屏的短剧完整剧本（可多场）。
-            单集目标时长约 {{duration}}，预估集数 {{name}} 相关设定见简报。
+            根据以下创作简报与源文本，写一部适合竖屏的短剧完整剧本（可多场）。
+            单集目标时长约 {{duration}}。
 
             创作简报：
             {{brief}}
+
+            用户补充/源文本：
+            {{source}}
 
             要求：
             1. 场次清晰，含对白与动作

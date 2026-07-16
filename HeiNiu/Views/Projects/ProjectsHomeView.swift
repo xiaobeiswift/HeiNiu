@@ -65,9 +65,11 @@ struct ProjectsHomeView: View {
     }
 
     var body: some View {
+        // 互斥切换：详情打开时不要继续计算列表网格 body（ZStack 常驻会双份开销）
         Group {
             if let project = selectedProject {
                 projectDetail(project)
+                    .id(project.id)
             } else {
                 homeBrowser
             }
@@ -408,10 +410,11 @@ struct ProjectsHomeView: View {
     // MARK: - Detail
 
     private func projectDetail(_ project: ProjectItem) -> some View {
-        // 顶栏 + 下方：左流程 / 右工作区（流程写在左边）
+        // 顶栏固定 + 下方流水线占满剩余高度（避免子视图把返回按钮挤出视口）
         VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Button {
+                    // 先切回列表，详情在下一帧卸载，避免大段正文销毁阻塞点击反馈
                     selectedID = nil
                 } label: {
                     Label("最近项目", systemImage: "chevron.left")
@@ -419,6 +422,7 @@ struct ProjectsHomeView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(AppTheme.accent)
+                .help("返回项目列表")
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(project.name)
@@ -432,7 +436,7 @@ struct ProjectsHomeView: View {
                     }
                 }
 
-                Spacer()
+                Spacer(minLength: 8)
 
                 Menu {
                     ForEach(ProjectStatus.allCases) { status in
@@ -472,15 +476,18 @@ struct ProjectsHomeView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(AppTheme.bgBase)
+            .zIndex(1)
 
             Divider().opacity(0.4)
 
-            ProjectPipelineView(
-                project: project,
-                pipeline: projects.pipeline(for: project.id)
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // 不要在 body 里同步 pipeline(for:) 写缓存；由流水线视图懒加载
+            ProjectPipelineView(project: project)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(-1)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private func detailGrid(_ rows: [(String, String)]) -> some View {

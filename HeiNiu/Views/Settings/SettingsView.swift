@@ -74,6 +74,7 @@ struct SettingsView: View {
                 .padding(.top, 24)
                 .padding(.bottom, 16)
 
+            // 统一外层滚动；提示词模板编辑器自身固定高度，不会再撑开此 ScrollView
             ScrollView {
                 VStack(alignment: .leading, spacing: AppTheme.sectionSpacing) {
                     switch pane {

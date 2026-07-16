@@ -17,12 +17,24 @@ import Observation
 final class ProjectStore {
     /// 全部项目。
     var projects: [ProjectItem] = []
-    /// 内存中的流水线缓存（按项目 ID）。
+    /// 流水线缓存（按项目 ID）。
+    ///
+    /// 必须 `@ObservationIgnored`：若被观察，`pipeline(for:)` 在视图 body 里写缓存
+    /// 会触发整页 `ProjectsHomeView` 重绘，表现为「进入项目卡很久」。
+    @ObservationIgnored
     private var pipelineCache: [UUID: ProjectPipeline] = [:]
 
+    /// 项目列表等小文件：可读性优先。
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+
+    /// 流水线可能含超长剧本：紧凑编码，避免主线程 pretty/sorted 卡顿。
+    private let pipelineEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }()
@@ -123,20 +135,34 @@ final class ProjectStore {
     }
 
     /// 保存流水线快照。
+    ///
+    /// 内存缓存同步更新；编码与写盘都尽量不挡点击反馈。
     func savePipeline(_ pipeline: ProjectPipeline) {
         var pipe = pipeline
         pipe.updatedAt = Date()
         pipelineCache[pipe.projectID] = pipe
-        AppPaths.ensureProjectDirectory(for: pipe.projectID)
-        do {
-            let data = try encoder.encode(pipe)
-            try data.write(
-                to: AppPaths.projectPipelineFileURL(for: pipe.projectID),
-                options: .atomic
-            )
-        } catch {
-            // ignore
+        persistPipelineToDisk(pipe)
+    }
+
+    /// 仅更新内存中的某步状态（不立刻编码落盘），供「开始生成」瞬间用。
+    func markPipelineStep(
+        _ kind: PipelineStepKind,
+        projectID: UUID,
+        status: PipelineStepStatus,
+        errorMessage: String? = nil
+    ) -> ProjectPipeline {
+        var pipe = pipeline(for: projectID)
+        pipe.currentKind = kind
+        pipe.updateStep(kind) { step in
+            step.status = status
+            if status == .running {
+                step.errorMessage = nil
+            } else {
+                step.errorMessage = errorMessage
+            }
         }
+        pipelineCache[projectID] = pipe
+        return pipe
     }
 
     /// 执行一步并落盘（失败也会写入 failed 状态）。
@@ -144,26 +170,50 @@ final class ProjectStore {
     func runPipelineStep(
         _ kind: PipelineStepKind,
         projectID: UUID,
-        settings: SettingsStore
+        settings: SettingsStore,
+        options: PipelineStepOptions = .init()
     ) async throws -> ProjectPipeline {
         guard let project = project(id: projectID) else {
             throw LLMError.underlying("项目不存在")
         }
+        // 让出主线程一帧，确保按钮已切到「生成中…」
+        await Task.yield()
+
         let current = pipeline(for: projectID)
         do {
             let next = try await ProjectPipelineRunner.run(
                 step: kind,
                 project: project,
                 pipeline: current,
-                settings: settings
+                settings: settings,
+                options: options
             )
             savePipeline(next)
-            // 粗粒度推进项目状态
-            advanceProjectStatus(for: projectID, completed: kind)
+            // 项目状态落盘放到下一轮，避免和 pipeline 编码抢主线程
+            let completed = kind
+            Task { @MainActor in
+                advanceProjectStatus(for: projectID, completed: completed)
+            }
             return next
         } catch let err as PipelineRunError {
             savePipeline(err.pipeline)
             throw err
+        }
+    }
+
+    private func persistPipelineToDisk(_ pipe: ProjectPipeline) {
+        let projectID = pipe.projectID
+        let url = AppPaths.projectPipelineFileURL(for: projectID)
+        AppPaths.ensureProjectDirectory(for: projectID)
+        // 紧凑 JSON：大剧本时比 prettyPrinted + sortedKeys 轻得多
+        let data: Data
+        do {
+            data = try pipelineEncoder.encode(pipe)
+        } catch {
+            return
+        }
+        Task.detached(priority: .utility) {
+            try? data.write(to: url, options: .atomic)
         }
     }
 
@@ -180,6 +230,7 @@ final class ProjectStore {
         guard let mapped else { return }
         // 不自动从归档/完成往回跳
         if project.status == .archived || project.status == .done { return }
+        if project.status == mapped { return }
         project.status = mapped
         updateProject(project)
     }

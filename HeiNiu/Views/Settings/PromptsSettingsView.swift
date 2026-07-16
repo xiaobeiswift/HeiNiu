@@ -51,21 +51,23 @@ struct PromptsSettingsView: View {
             } else {
                 HStack(alignment: .top, spacing: 14) {
                     promptList
-                        .frame(width: 240)
+                        .frame(width: 240, alignment: .top)
 
                     if let item = selectedItem {
                         PromptEditorPanel(itemID: item.id, onSaved: onSaved)
                             .id(item.id)
+                            .frame(maxWidth: .infinity, alignment: .top)
                     } else {
                         StudioCard {
                             Text("选择一条提示词")
                                 .foregroundStyle(AppTheme.textSecondary)
-                                .frame(maxWidth: .infinity, minHeight: 200)
+                                .frame(maxWidth: .infinity, minHeight: 200, alignment: .center)
                         }
                     }
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .onChange(of: selectedCategory) { _, _ in
             selectedID = items.first?.id
         }
@@ -199,7 +201,7 @@ struct PromptsSettingsView: View {
             }
         }
         .padding(12)
-        .frame(maxHeight: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: AppTheme.cardRadius, style: .continuous)
                 .fill(AppTheme.bgCard)
@@ -309,6 +311,8 @@ private struct PromptEditorPanel: View {
     @State private var category: PromptCategory = .script
     @State private var debouncer = DebouncedAction()
     @State private var ready = false
+    /// 控制模板编辑器光标插入。
+    @State private var templateController = PromptTemplateEditorController()
 
     /// selectedProvider。
     private var selectedProvider: LLMProvider? {
@@ -317,6 +321,7 @@ private struct PromptEditorPanel: View {
 
     /// SwiftUI 视图内容。
     var body: some View {
+        // 自然高度布局：由设置页外层 ScrollView 滚动；模板框固定高度内部滚
         VStack(alignment: .leading, spacing: AppTheme.sectionSpacing) {
             StudioCard(title: "基本信息") {
                 VStack(alignment: .leading, spacing: 14) {
@@ -386,25 +391,15 @@ private struct PromptEditorPanel: View {
                 }
             }
 
-            StudioCard(title: "建议变量") {
-                FlowLayout(spacing: 8) {
-                    ForEach(category.variableChips, id: \.self) { chip in
-                        Text(chip)
-                            .font(.caption.monospaced())
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .foregroundStyle(AppTheme.accent)
-                            .background(AppTheme.accentSoft, in: Capsule())
-                    }
-                }
-            }
-
             StudioCard {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Text("模板")
                             .font(.headline)
                         Spacer()
+                        Text("\(template.count) 字")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(AppTheme.textTertiary)
                         Button("恢复模板") {
                             settings.resetPromptTemplate(id: itemID)
                             load()
@@ -415,11 +410,38 @@ private struct PromptEditorPanel: View {
                         .foregroundStyle(AppTheme.accent)
                     }
 
-                    TextEditor(text: $template)
-                        .font(.system(.body, design: .monospaced))
-                        .scrollContentBackground(.hidden)
-                        .padding(12)
-                        .frame(minHeight: 260)
+                    // 建议变量：属于模板，点击插入到光标位置
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Text("建议变量")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(AppTheme.textSecondary)
+                            Text("点击插入到光标处")
+                                .font(.caption2)
+                                .foregroundStyle(AppTheme.textTertiary)
+                        }
+                        FlowLayout(spacing: 8) {
+                            ForEach(category.variableChips, id: \.self) { chip in
+                                Button {
+                                    insertVariableChip(chip)
+                                } label: {
+                                    Text(chip)
+                                        .font(.caption.monospaced())
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .foregroundStyle(AppTheme.accent)
+                                        .background(AppTheme.accentSoft, in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                                .help("插入 \(chip)")
+                            }
+                        }
+                    }
+
+                    // 固定高度：正文只在框内滚，外层设置页仍可整体滚动
+                    PromptTemplateNSEditor(text: $template, controller: templateController)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 360)
                         .background(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .fill(AppTheme.bgElevated)
@@ -428,9 +450,11 @@ private struct PromptEditorPanel: View {
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 .stroke(AppTheme.stroke, lineWidth: 1)
                         )
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .onAppear { load() }
         .onChange(of: itemID) { _, _ in load() }
         .onChange(of: name) { _, _ in scheduleSave() }
@@ -448,8 +472,6 @@ private struct PromptEditorPanel: View {
         .onChange(of: category) { _, _ in scheduleSave() }
     }
 
-    /// 从磁盘加载持久化数据
-    ///
     /// 从磁盘加载持久化数据。
     private func load() {
         ready = false
@@ -467,17 +489,24 @@ private struct PromptEditorPanel: View {
         }
     }
 
-    /// scheduleSave
-    ///
-    /// 执行 `scheduleSave` 相关逻辑。
+    private func insertVariableChip(_ chip: String) {
+        templateController.insert(chip) { token in
+            // 无焦点时：追加到末尾
+            if template.isEmpty {
+                template = token
+            } else if template.hasSuffix("\n") {
+                template += token
+            } else {
+                template += token
+            }
+        }
+    }
+
     private func scheduleSave() {
         guard ready else { return }
         debouncer.schedule { save() }
     }
 
-    /// 将当前状态写入磁盘
-    ///
-    /// 将当前状态写入磁盘。
     private func save() {
         guard var item = settings.promptItem(id: itemID) else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -489,5 +518,107 @@ private struct PromptEditorPanel: View {
         item.category = category
         settings.updatePrompt(item)
         onSaved()
+    }
+}
+
+// MARK: - Template editor with cursor insertion
+
+/// 持有模板 NSTextView 引用，供变量 chip 插入光标处。
+@MainActor
+private final class PromptTemplateEditorController {
+    weak var textView: NSTextView?
+
+    /// 在当前选区插入文本；若编辑器未就绪则走 fallback。
+    func insert(_ token: String, fallback: (String) -> Void) {
+        guard let textView, textView.window != nil else {
+            fallback(token)
+            return
+        }
+        let range = textView.selectedRange()
+        guard textView.shouldChangeText(in: range, replacementString: token) else {
+            fallback(token)
+            return
+        }
+        textView.replaceCharacters(in: range, with: token)
+        textView.didChangeText()
+        let newLocation = min(range.location + (token as NSString).length, textView.string.utf16.count)
+        textView.setSelectedRange(NSRange(location: newLocation, length: 0))
+        textView.scrollRangeToVisible(NSRange(location: newLocation, length: 0))
+        textView.window?.makeFirstResponder(textView)
+    }
+}
+
+/// 等宽模板编辑器：固定在父容器内滚动，支持光标处插入变量。
+private struct PromptTemplateNSEditor: NSViewRepresentable {
+    @Binding var text: String
+    var controller: PromptTemplateEditorController
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSTextView.scrollableTextView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+
+        guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
+        textView.delegate = context.coordinator
+        textView.isRichText = false
+        textView.allowsUndo = true
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.usesFontPanel = false
+        textView.usesFindBar = true
+        textView.isHorizontallyResizable = false
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.font = NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        textView.textColor = NSColor.labelColor
+        textView.insertionPointColor = NSColor.labelColor
+        textView.backgroundColor = .clear
+        textView.drawsBackground = false
+        textView.string = text
+        textView.textContainerInset = NSSize(width: 10, height: 10)
+
+        context.coordinator.textView = textView
+        controller.textView = textView
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        controller.textView = context.coordinator.textView
+        guard let textView = context.coordinator.textView else { return }
+        if textView.string != text {
+            let selected = textView.selectedRange()
+            textView.string = text
+            let maxLoc = (text as NSString).length
+            let loc = min(selected.location, maxLoc)
+            let len = min(selected.length, max(0, maxLoc - loc))
+            textView.setSelectedRange(NSRange(location: loc, length: len))
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        var parent: PromptTemplateNSEditor
+        weak var textView: NSTextView?
+
+        init(_ parent: PromptTemplateNSEditor) {
+            self.parent = parent
+        }
+
+        func textDidChange(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            if parent.text != textView.string {
+                parent.text = textView.string
+            }
+        }
     }
 }
