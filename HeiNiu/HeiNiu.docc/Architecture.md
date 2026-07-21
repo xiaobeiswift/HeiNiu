@@ -34,7 +34,7 @@ HeiNiuApp
 
 1. 导入器抽取 TXT/Markdown/JSON/CSV/字幕、PDF、RTF 或 DOCX 正文，原文件复制到应用数据目录
 2. 正文按约 1,000 字符、150 字符重叠切块
-3. ``OpenAIEmbeddingClient`` 以每批最多 32 个片段调用 OpenAI 兼容 `/embeddings`
+3. ``OpenAIEmbeddingClient`` 以每批最多 32 个片段调用标准 `/embeddings`；豆包多模态模式按顺序调用 `/embeddings/multimodal`
 4. SQLite 保存 Float32 向量；检索时用余弦相似度排序
 5. 每次最多返回 6 段、约 8,000 字符，同一资料最多两段
 

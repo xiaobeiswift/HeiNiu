@@ -30,7 +30,7 @@
 
 `KnowledgeBase/` 是当前全局知识库；不要与历史智能体留下的 `knowledge.json` 和 `Knowledge/` 混淆，后两者仍不读取或写入。
 
-知识库使用 SQLite 保存集合、文档、标签、分块与 Float32 向量，原文件复制到 `KnowledgeBase/Files/`。项目仅在 `projects.json` 保存集合/文档 UUID 引用。普通设置备份不含知识内容；知识库通过独立 `.heiniukb` 归档迁移。
+知识库使用 SQLite 保存集合、文档、标签、分块与 Float32 向量，原文件复制到 `KnowledgeBase/Files/`。嵌入接口支持标准 `/embeddings` 和豆包 `/embeddings/multimodal` 两种请求格式。项目仅在 `projects.json` 保存集合/文档 UUID 引用。普通设置备份不含知识内容；知识库通过独立 `.heiniukb` 归档迁移。
 
 ## 文档注释规范
 

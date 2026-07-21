@@ -14,7 +14,7 @@ https://xiaobeiswift.github.io/HeiNiu/documentation/heiniu/
 - 项目：新建本地项目或挂载外部素材目录
 - 创作流水线：导入/粘贴源文本，选择提示词，生成并保存阶段产物
 - 全局知识库：集合、标签、文件和笔记，项目可引用集合或单条资料
-- 语义检索：通过 OpenAI 兼容 `/embeddings` 建立本地向量索引，生成结果保留命中来源
+- 语义检索：支持标准 `/embeddings` 与豆包 `/embeddings/multimodal`，生成结果保留命中来源
 - LLM 服务商：OpenAI 兼容与 Anthropic，支持模型列表及连接测试
 - 提示词库：按剧本、分镜、生图、生视频、角色、场景、物品分类管理
 - 生图 / 生视频：配置多家接口、模型和默认参数

@@ -23,6 +23,7 @@ struct SettingsBackup: Codable {
     /// 知识库嵌入服务商与模型配置（不含 Key）。
     var knowledgeEmbeddingProviderID: UUID?
     var knowledgeEmbeddingModel: String
+    var knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode
     /// 提示词库全部条目。
     var promptItems: [PromptItem]
     /// 生图服务商列表。
@@ -36,7 +37,7 @@ struct SettingsBackup: Codable {
     /// 生视频 Key 字典。
     var videoAPIKeys: [String: String]
 
-    static let currentFormatVersion = 2
+    static let currentFormatVersion = 3
 
     /// 初始化方法
     ///
@@ -49,6 +50,7 @@ struct SettingsBackup: Codable {
         providers: [LLMProvider],
         knowledgeEmbeddingProviderID: UUID? = nil,
         knowledgeEmbeddingModel: String = "",
+        knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode = .openAIText,
         promptItems: [PromptItem],
         imageProviders: [ImageProvider],
         videoProviders: [VideoProvider],
@@ -63,6 +65,7 @@ struct SettingsBackup: Codable {
         self.providers = providers
         self.knowledgeEmbeddingProviderID = knowledgeEmbeddingProviderID
         self.knowledgeEmbeddingModel = knowledgeEmbeddingModel
+        self.knowledgeEmbeddingAPIMode = knowledgeEmbeddingAPIMode
         self.promptItems = promptItems
         self.imageProviders = imageProviders
         self.videoProviders = videoProviders
@@ -83,6 +86,7 @@ struct SettingsBackup: Codable {
         providers = try container.decodeIfPresent([LLMProvider].self, forKey: .providers) ?? []
         knowledgeEmbeddingProviderID = try container.decodeIfPresent(UUID.self, forKey: .knowledgeEmbeddingProviderID)
         knowledgeEmbeddingModel = try container.decodeIfPresent(String.self, forKey: .knowledgeEmbeddingModel) ?? ""
+        knowledgeEmbeddingAPIMode = try container.decodeIfPresent(KnowledgeEmbeddingAPIMode.self, forKey: .knowledgeEmbeddingAPIMode) ?? .openAIText
         promptItems = try container.decodeIfPresent([PromptItem].self, forKey: .promptItems) ?? []
         imageProviders = try container.decodeIfPresent([ImageProvider].self, forKey: .imageProviders) ?? []
         videoProviders = try container.decodeIfPresent([VideoProvider].self, forKey: .videoProviders) ?? []
@@ -101,7 +105,7 @@ struct SettingsBackup: Codable {
         ///
         /// LLM 服务商列表。
         case providers, promptItems, imageProviders, videoProviders
-        case knowledgeEmbeddingProviderID, knowledgeEmbeddingModel
+        case knowledgeEmbeddingProviderID, knowledgeEmbeddingModel, knowledgeEmbeddingAPIMode
         /// LLM Key 字典。
         case llmAPIKeys, imageAPIKeys, videoAPIKeys
     }

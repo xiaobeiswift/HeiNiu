@@ -113,7 +113,7 @@ struct ProvidersSettingsView: View {
     }
 
     private var embeddingCard: some View {
-        StudioCard(title: "知识库嵌入模型", subtitle: "用于资料分块索引与流水线语义检索，调用 OpenAI 兼容 /embeddings。") {
+        StudioCard(title: "知识库嵌入模型", subtitle: "支持标准文本向量与豆包多模态向量接口。") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 12) {
                     Text("服务商")
@@ -127,6 +127,21 @@ struct ProvidersSettingsView: View {
                     }
                     .labelsHidden()
                     .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: 12) {
+                    Text("接口类型")
+                        .frame(width: 64, alignment: .leading)
+                        .foregroundStyle(AppTheme.textSecondary)
+                    Picker("接口类型", selection: embeddingAPIModeBinding) {
+                        ForEach(KnowledgeEmbeddingAPIMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(settings.knowledgeEmbeddingProviderID == nil)
+                    Text(settings.knowledgeEmbeddingAPIMode.endpointPath)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(AppTheme.textTertiary)
                 }
                 HStack(spacing: 12) {
                     Text("模型 ID")
@@ -187,6 +202,22 @@ struct ProvidersSettingsView: View {
             get: { settings.knowledgeEmbeddingModel },
             set: { model in
                 settings.setKnowledgeEmbedding(providerID: settings.knowledgeEmbeddingProviderID, model: model)
+                knowledge.markAllPending()
+                embeddingTestMessage = nil
+                onSaved()
+            }
+        )
+    }
+
+    private var embeddingAPIModeBinding: Binding<KnowledgeEmbeddingAPIMode> {
+        Binding(
+            get: { settings.knowledgeEmbeddingAPIMode },
+            set: { apiMode in
+                settings.setKnowledgeEmbedding(
+                    providerID: settings.knowledgeEmbeddingProviderID,
+                    model: settings.knowledgeEmbeddingModel,
+                    apiMode: apiMode
+                )
                 knowledge.markAllPending()
                 embeddingTestMessage = nil
                 onSaved()

@@ -2,6 +2,30 @@
 
 import Foundation
 
+/// 知识库嵌入接口的请求格式。
+nonisolated enum KnowledgeEmbeddingAPIMode: String, Codable, CaseIterable, Identifiable, Sendable {
+    /// OpenAI 兼容文本向量：`POST /embeddings`，`input` 为字符串数组。
+    case openAIText
+    /// 火山方舟图文向量：`POST /embeddings/multimodal`，`input` 为多模态对象数组。
+    case doubaoMultimodal
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .openAIText: "标准文本向量"
+        case .doubaoMultimodal: "豆包多模态向量"
+        }
+    }
+
+    var endpointPath: String {
+        switch self {
+        case .openAIText: "/embeddings"
+        case .doubaoMultimodal: "/embeddings/multimodal"
+        }
+    }
+}
+
 /// 资料的来源类型。
 nonisolated enum KnowledgeSourceKind: String, Codable, Sendable {
     case file

@@ -52,6 +52,8 @@ final class SettingsStore {
     var knowledgeEmbeddingProviderID: UUID?
     /// 知识库向量模型 ID。
     var knowledgeEmbeddingModel: String = ""
+    /// 知识库嵌入接口格式。
+    var knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode = .openAIText
     /// 提示词库全部条目（多分类多条）。
     ///
     /// 按分类筛选请在 UI 层对 `category` 过滤。默认模板见 ``DefaultPrompts``。
@@ -114,6 +116,7 @@ final class SettingsStore {
         if knowledgeEmbeddingProviderID == id {
             knowledgeEmbeddingProviderID = nil
             knowledgeEmbeddingModel = ""
+            knowledgeEmbeddingAPIMode = .openAIText
         }
         KeychainHelper.delete(account: Self.llmKeyAccount(id))
 
@@ -126,11 +129,20 @@ final class SettingsStore {
     }
 
     /// 更新知识库嵌入服务配置。
-    func setKnowledgeEmbedding(providerID: UUID?, model: String) {
+    func setKnowledgeEmbedding(
+        providerID: UUID?,
+        model: String,
+        apiMode: KnowledgeEmbeddingAPIMode? = nil
+    ) {
         knowledgeEmbeddingProviderID = providerID
         knowledgeEmbeddingModel = providerID == nil
             ? ""
             : model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if providerID == nil {
+            knowledgeEmbeddingAPIMode = .openAIText
+        } else if let apiMode {
+            knowledgeEmbeddingAPIMode = apiMode
+        }
         save()
     }
 
@@ -476,6 +488,7 @@ final class SettingsStore {
             providers = persisted.providers
             knowledgeEmbeddingProviderID = persisted.knowledgeEmbeddingProviderID
             knowledgeEmbeddingModel = persisted.knowledgeEmbeddingModel
+            knowledgeEmbeddingAPIMode = persisted.knowledgeEmbeddingAPIMode
             promptItems = persisted.promptItems
             imageProviders = persisted.imageProviders
             videoProviders = persisted.videoProviders
@@ -529,7 +542,8 @@ final class SettingsStore {
             imageProviders: imageProviders,
             videoProviders: videoProviders,
             knowledgeEmbeddingProviderID: knowledgeEmbeddingProviderID,
-            knowledgeEmbeddingModel: knowledgeEmbeddingModel
+            knowledgeEmbeddingModel: knowledgeEmbeddingModel,
+            knowledgeEmbeddingAPIMode: knowledgeEmbeddingAPIMode
         )
         do {
             let data = try encoder.encode(persisted)
@@ -559,6 +573,7 @@ final class SettingsStore {
             providers: providers,
             knowledgeEmbeddingProviderID: knowledgeEmbeddingProviderID,
             knowledgeEmbeddingModel: knowledgeEmbeddingModel,
+            knowledgeEmbeddingAPIMode: knowledgeEmbeddingAPIMode,
             promptItems: promptItems,
             imageProviders: imageProviders,
             videoProviders: videoProviders,
@@ -609,6 +624,7 @@ final class SettingsStore {
             providers = backup.providers
             knowledgeEmbeddingProviderID = backup.knowledgeEmbeddingProviderID
             knowledgeEmbeddingModel = backup.knowledgeEmbeddingModel
+            knowledgeEmbeddingAPIMode = backup.knowledgeEmbeddingAPIMode
             promptItems = backup.promptItems
             imageProviders = backup.imageProviders
             videoProviders = backup.videoProviders
@@ -622,6 +638,7 @@ final class SettingsStore {
             if backup.knowledgeEmbeddingProviderID != nil || !backup.knowledgeEmbeddingModel.isEmpty {
                 knowledgeEmbeddingProviderID = backup.knowledgeEmbeddingProviderID
                 knowledgeEmbeddingModel = backup.knowledgeEmbeddingModel
+                knowledgeEmbeddingAPIMode = backup.knowledgeEmbeddingAPIMode
             }
             mergePromptItems(backup.promptItems)
             mergeProviders(backup.imageProviders, into: &imageProviders)
@@ -644,6 +661,7 @@ final class SettingsStore {
         providers = []
         knowledgeEmbeddingProviderID = nil
         knowledgeEmbeddingModel = ""
+        knowledgeEmbeddingAPIMode = .openAIText
         promptItems = DefaultPrompts.seedItems()
         imageProviders = []
         videoProviders = []
@@ -909,6 +927,7 @@ private struct PersistedSettings: Codable {
     var providers: [LLMProvider]
     var knowledgeEmbeddingProviderID: UUID?
     var knowledgeEmbeddingModel: String
+    var knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode
     /// 提示词库全部条目。
     var promptItems: [PromptItem]
     /// 生图服务商列表。
@@ -929,7 +948,8 @@ private struct PersistedSettings: Codable {
         imageProviders: [ImageProvider],
         videoProviders: [VideoProvider],
         knowledgeEmbeddingProviderID: UUID? = nil,
-        knowledgeEmbeddingModel: String = ""
+        knowledgeEmbeddingModel: String = "",
+        knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode = .openAIText
     ) {
         self.providers = providers
         self.promptItems = promptItems
@@ -937,6 +957,7 @@ private struct PersistedSettings: Codable {
         self.videoProviders = videoProviders
         self.knowledgeEmbeddingProviderID = knowledgeEmbeddingProviderID
         self.knowledgeEmbeddingModel = knowledgeEmbeddingModel
+        self.knowledgeEmbeddingAPIMode = knowledgeEmbeddingAPIMode
         self.migratedFromLegacyPrompts = nil
         self.legacyImageGen = nil
     }
@@ -949,6 +970,7 @@ private struct PersistedSettings: Codable {
         providers = try container.decodeIfPresent([LLMProvider].self, forKey: .providers) ?? []
         knowledgeEmbeddingProviderID = try container.decodeIfPresent(UUID.self, forKey: .knowledgeEmbeddingProviderID)
         knowledgeEmbeddingModel = try container.decodeIfPresent(String.self, forKey: .knowledgeEmbeddingModel) ?? ""
+        knowledgeEmbeddingAPIMode = try container.decodeIfPresent(KnowledgeEmbeddingAPIMode.self, forKey: .knowledgeEmbeddingAPIMode) ?? .openAIText
         videoProviders = try container.decodeIfPresent([VideoProvider].self, forKey: .videoProviders) ?? []
 
         if let items = try container.decodeIfPresent([ImageProvider].self, forKey: .imageProviders) {
@@ -982,6 +1004,7 @@ private struct PersistedSettings: Codable {
         try container.encode(providers, forKey: .providers)
         try container.encodeIfPresent(knowledgeEmbeddingProviderID, forKey: .knowledgeEmbeddingProviderID)
         try container.encode(knowledgeEmbeddingModel, forKey: .knowledgeEmbeddingModel)
+        try container.encode(knowledgeEmbeddingAPIMode, forKey: .knowledgeEmbeddingAPIMode)
         try container.encode(promptItems, forKey: .promptItems)
         try container.encode(imageProviders, forKey: .imageProviders)
         try container.encode(videoProviders, forKey: .videoProviders)
@@ -995,7 +1018,7 @@ private struct PersistedSettings: Codable {
         ///
         /// LLM 服务商列表。
         case providers, promptItems, imageProviders, videoProviders, imageGen, prompts
-        case knowledgeEmbeddingProviderID, knowledgeEmbeddingModel
+        case knowledgeEmbeddingProviderID, knowledgeEmbeddingModel, knowledgeEmbeddingAPIMode
     }
 
     /// migrateLegacyPrompts

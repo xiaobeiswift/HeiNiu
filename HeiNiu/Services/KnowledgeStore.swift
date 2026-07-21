@@ -231,7 +231,8 @@ final class KnowledgeStore {
                     inputs: batch,
                     provider: target.provider,
                     model: target.model,
-                    apiKey: target.apiKey
+                    apiKey: target.apiKey,
+                    apiMode: target.apiMode
                 )
                 vectors.append(contentsOf: result)
             }
@@ -280,7 +281,8 @@ final class KnowledgeStore {
             inputs: ["黑妞短剧知识库连接测试"],
             provider: target.provider,
             model: target.model,
-            apiKey: target.apiKey
+            apiKey: target.apiKey,
+            apiMode: target.apiMode
         )
         return vectors.first?.count ?? 0
     }
@@ -309,7 +311,8 @@ final class KnowledgeStore {
             inputs: [String(query.prefix(12_000))],
             provider: target.provider,
             model: target.model,
-            apiKey: target.apiKey
+            apiKey: target.apiKey,
+            apiMode: target.apiMode
         ).first ?? []
         let chunks = try database?.loadChunks(
             documentIDs: Set(ready.map(\.id)),
@@ -459,7 +462,13 @@ final class KnowledgeStore {
         collections.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    private func embeddingTarget(settings: SettingsStore) throws -> (provider: LLMProvider, model: String, apiKey: String, fingerprint: String) {
+    private func embeddingTarget(settings: SettingsStore) throws -> (
+        provider: LLMProvider,
+        model: String,
+        apiKey: String,
+        apiMode: KnowledgeEmbeddingAPIMode,
+        fingerprint: String
+    ) {
         guard let provider = settings.provider(id: settings.knowledgeEmbeddingProviderID),
               provider.protocolType == .openAICompatible
         else { throw LLMError.underlying("请在设置中选择 OpenAI 兼容的知识库嵌入服务商") }
@@ -467,14 +476,21 @@ final class KnowledgeStore {
         guard !model.isEmpty else { throw EmbeddingError.emptyModel }
         let apiKey = settings.apiKey(for: provider.id)
         guard !apiKey.isEmpty else { throw LLMError.missingAPIKey }
-        return (provider, model, apiKey, "\(provider.id.uuidString)|\(provider.effectiveBaseURL)|\(model)")
+        let apiMode = settings.knowledgeEmbeddingAPIMode
+        return (
+            provider,
+            model,
+            apiKey,
+            apiMode,
+            "\(provider.id.uuidString)|\(provider.effectiveBaseURL)|\(apiMode.rawValue)|\(model)"
+        )
     }
 
     private func currentFingerprint(settings: SettingsStore) -> String? {
         let model = settings.knowledgeEmbeddingModel.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let provider = settings.provider(id: settings.knowledgeEmbeddingProviderID),
               !model.isEmpty else { return nil }
-        return "\(provider.id.uuidString)|\(provider.effectiveBaseURL)|\(model)"
+        return "\(provider.id.uuidString)|\(provider.effectiveBaseURL)|\(settings.knowledgeEmbeddingAPIMode.rawValue)|\(model)"
     }
 
     private func normalizedTitle(_ value: String, fallback: String) -> String {

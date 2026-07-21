@@ -20,7 +20,7 @@
 ## 服务商
 
 - LLM：OpenAI 兼容（Chat Completions / Responses）与 Anthropic
-- 嵌入：复用 OpenAI 兼容服务商的 Base URL 与 API Key，模型 ID 独立配置
+- 嵌入：复用 OpenAI 兼容服务商的 Base URL 与 API Key，支持标准文本向量和豆包多模态向量请求格式
 - 生图 / 生视频：可配置多家服务商
 - API Key 存放于钥匙串，不写入普通设置文件
 
