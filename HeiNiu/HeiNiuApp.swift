@@ -24,6 +24,8 @@ struct HeiNiuApp: App {
     @State private var knowledgeStore = KnowledgeStore()
     /// 全局节点工作流与运行历史。
     @State private var workflowStore = WorkflowStore()
+    /// PixMax 登录、心跳和登录框队列。
+    @State private var pixmaxSessions = PixmaxSessionManager.shared
 
     /// 场景：主窗口。
     var body: some Scene {
@@ -32,6 +34,7 @@ struct HeiNiuApp: App {
                 .environment(settings)
                 .environment(knowledgeStore)
                 .environment(workflowStore)
+                .environment(pixmaxSessions)
                 .frame(minWidth: 1200, minHeight: 720)
                 .background(AppTheme.bgBase)
         }

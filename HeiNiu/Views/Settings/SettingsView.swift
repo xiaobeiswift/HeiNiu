@@ -136,5 +136,6 @@ struct SettingsView: View {
     SettingsView()
         .environment(SettingsStore())
         .environment(KnowledgeStore())
+        .environment(PixmaxSessionManager.shared)
         .frame(width: 960, height: 720)
 }

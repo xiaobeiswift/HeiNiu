@@ -63,7 +63,7 @@ final class WorkflowExecutor {
     func start(
         workflow: WorkflowDefinition,
         targetNodeID: UUID?,
-        runtimeInputs: [String: String],
+        runtimeInputs: [String: WorkflowValue],
         settings: SettingsStore,
         knowledge: any WorkflowKnowledgeSearching,
         store: WorkflowStore
@@ -73,8 +73,9 @@ final class WorkflowExecutor {
         var issues = WorkflowValidator.validate(validationWorkflow, settings: settings, registry: registry)
         let relevant = relevantNodeIDs(targetNodeID: targetNodeID, workflow: workflow)
         for node in workflow.nodes where relevant.contains(node.id) && node.kind == .runtimeInput {
-            let value = runtimeInputs[node.id.uuidString] ?? node.configuration.text
-            if node.configuration.isRequired && value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let value = runtimeInputs[node.id.uuidString]
+                ?? (node.configuration.runtimeInputType == .text ? .text(node.configuration.text) : nil)
+            if node.configuration.isRequired && (value?.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
                 issues.append(WorkflowValidationIssue(
                     severity: .error,
                     message: "运行输入“\(node.configuration.parameterName)”不能为空",
@@ -112,7 +113,7 @@ final class WorkflowExecutor {
     private func performRun(
         workflow: WorkflowDefinition,
         targetNodeID: UUID?,
-        runtimeInputs: [String: String],
+        runtimeInputs: [String: WorkflowValue],
         settings: SettingsStore,
         knowledge: any WorkflowKnowledgeSearching,
         store: WorkflowStore
@@ -128,13 +129,19 @@ final class WorkflowExecutor {
             run.nodeRuns[index].status = .skipped
             run.nodeRuns[index].message = "不在本次运行范围内"
         }
-        store.saveRun(run)
-
         do {
             try Task.checkCancellation()
+            let preparedRuntimeInputs = try prepareRuntimeInputs(
+                runtimeInputs,
+                workflowID: workflow.id,
+                runID: run.id,
+                store: store
+            )
+            run.runtimeInputs = preparedRuntimeInputs
+            store.saveRun(run)
             let loopComponents = WorkflowGraphAnalysis.loopComponents(in: workflow)
             let bodyNodeIDs = Set(loopComponents.flatMap { $0.nodeIDs.subtracting([$0.loopNodeID]) })
-            var inputs: [UUID: [String: WorkflowValue]] = [:]
+            var inputs: [UUID: [String: [WorkflowValue]]] = [:]
             var executed: Set<UUID> = []
             var madeProgress = true
 
@@ -146,12 +153,12 @@ final class WorkflowExecutor {
                     .sorted(by: stableNodeOrder)
                 for node in candidates {
                     if let component = loopComponents.first(where: { $0.loopNodeID == node.id }) {
-                        guard inputs[node.id]?["seed"] != nil else { continue }
+                        guard inputs[node.id]?["seed"]?.isEmpty == false else { continue }
                         let outputs = try await executeLoop(
                             component: component,
                             workflow: workflow,
                             initialInputs: inputs[node.id] ?? [:],
-                            runtimeInputs: runtimeInputs,
+                            runtimeInputs: preparedRuntimeInputs,
                             runID: run.id,
                             settings: settings,
                             knowledge: knowledge,
@@ -170,7 +177,7 @@ final class WorkflowExecutor {
                         let outputs = try await executeAndRecord(
                             node: node,
                             inputs: inputs[node.id] ?? [:],
-                            runtimeInputs: runtimeInputs,
+                            runtimeInputs: preparedRuntimeInputs,
                             workflow: workflow,
                             runID: run.id,
                             settings: settings,
@@ -219,15 +226,15 @@ final class WorkflowExecutor {
     private func executeLoop(
         component: WorkflowLoopComponent,
         workflow: WorkflowDefinition,
-        initialInputs: [String: WorkflowValue],
-        runtimeInputs: [String: String],
+        initialInputs: [String: [WorkflowValue]],
+        runtimeInputs: [String: WorkflowValue],
         runID: UUID,
         settings: SettingsStore,
         knowledge: any WorkflowKnowledgeSearching,
         store: WorkflowStore
     ) async throws -> [String: WorkflowValue] {
         guard let loop = workflow.nodes.first(where: { $0.id == component.loopNodeID }),
-              case .text(let seed) = initialInputs["seed"]
+              case .text(let seed) = initialInputs["seed"]?.first
         else { throw WorkflowExecutionError.invalidValue("循环初始值必须是文本") }
         let bodyIDs = component.nodeIDs.subtracting([loop.id])
         let internalConnections = workflow.connections.filter {
@@ -251,7 +258,7 @@ final class WorkflowExecutor {
                 iteration: iteration,
                 persist: true
             )
-            var bodyInputs: [UUID: [String: WorkflowValue]] = [:]
+            var bodyInputs: [UUID: [String: [WorkflowValue]]] = [:]
             var bodyOutputs: [UUID: [String: WorkflowValue]] = [:]
             var executed: Set<UUID> = []
             propagate(
@@ -335,8 +342,8 @@ final class WorkflowExecutor {
 
     private func executeAndRecord(
         node: WorkflowNode,
-        inputs: [String: WorkflowValue],
-        runtimeInputs: [String: String],
+        inputs: [String: [WorkflowValue]],
+        runtimeInputs: [String: WorkflowValue],
         workflow: WorkflowDefinition,
         runID: UUID,
         settings: SettingsStore,
@@ -391,8 +398,8 @@ final class WorkflowExecutor {
 
     private func executeNode(
         _ node: WorkflowNode,
-        inputs: [String: WorkflowValue],
-        runtimeInputs: [String: String],
+        inputs: [String: [WorkflowValue]],
+        runtimeInputs: [String: WorkflowValue],
         workflow: WorkflowDefinition,
         runID: UUID,
         settings: SettingsStore,
@@ -404,11 +411,19 @@ final class WorkflowExecutor {
         try Task.checkCancellation()
         switch node.kind {
         case .runtimeInput:
-            let value = runtimeInputs[node.id.uuidString] ?? node.configuration.text
-            if node.configuration.isRequired && value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let expectedType = node.configuration.runtimeInputType.valueType
+            let value = runtimeInputs[node.id.uuidString]
+                ?? (node.configuration.runtimeInputType == .text ? .text(node.configuration.text) : nil)
+            guard let value else {
                 throw WorkflowExecutionError.missingInput(node.configuration.parameterName)
             }
-            return ["text": .text(value)]
+            if node.configuration.isRequired && value.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw WorkflowExecutionError.missingInput(node.configuration.parameterName)
+            }
+            guard value.valueType == expectedType else {
+                throw WorkflowExecutionError.invalidValue("运行输入“\(node.configuration.parameterName)”应为\(expectedType.title)")
+            }
+            return [node.configuration.runtimeInputType.rawValue: value]
 
         case .promptTemplate:
             let resolved = WorkflowValidator.resolvedTemplate(for: node, settings: settings)
@@ -418,7 +433,7 @@ final class WorkflowExecutor {
             var output = resolved.template
             let effective = WorkflowValidator.effectiveNode(node, settings: settings)
             for variable in effective.configuration.templateVariables {
-                guard case .text(let value) = inputs[variable] else {
+                guard case .text(let value) = inputs[variable]?.first else {
                     throw WorkflowExecutionError.missingInput("{{\(variable)}}")
                 }
                 let pattern = #"\{\{\s*"# + NSRegularExpression.escapedPattern(for: variable) + #"\s*\}\}"#
@@ -433,7 +448,7 @@ final class WorkflowExecutor {
             return ["text": .text(output)]
 
         case .knowledgeSearch:
-            guard case .text(let query) = inputs["query"] else {
+            guard case .text(let query) = inputs["query"]?.first else {
                 throw WorkflowExecutionError.invalidValue("知识检索输入必须是文本")
             }
             let results = try await knowledge.search(
@@ -449,7 +464,7 @@ final class WorkflowExecutor {
             return ["context": .text(text)]
 
         case .llm:
-            guard case .text(let prompt) = inputs["prompt"],
+            guard case .text(let prompt) = inputs["prompt"]?.first,
                   let provider = settings.provider(id: node.configuration.providerID)
             else { throw LLMError.missingProvider }
             let model = node.configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -487,7 +502,7 @@ final class WorkflowExecutor {
             return outputs
 
         case .imageGeneration:
-            guard case .text(let prompt) = inputs["prompt"],
+            guard case .text(let prompt) = inputs["prompt"]?.first,
                   let provider = settings.imageProvider(id: node.configuration.providerID)
             else { throw WorkflowExecutionError.invalidValue("生图节点需要文本提示词和有效服务商") }
             guard let adapter = registry.imageAdapter(id: provider.adapterID) else {
@@ -496,12 +511,12 @@ final class WorkflowExecutor {
             let key = settings.imageAPIKey(for: provider.id)
             guard !key.isEmpty else { throw LLMError.missingAPIKey }
             var referenceURL: URL?
-            if case .image(let relative) = inputs["referenceImage"] {
+            if case .image(let relative) = inputs["referenceImage"]?.first {
                 referenceURL = store.runRoot(workflowID: workflow.id, runID: runID)
                     .appendingPathComponent(relative)
             }
             var maskURL: URL?
-            if case .image(let relative) = inputs["maskImage"] {
+            if case .image(let relative) = inputs["maskImage"]?.first {
                 maskURL = store.runRoot(workflowID: workflow.id, runID: runID)
                     .appendingPathComponent(relative)
             }
@@ -527,27 +542,34 @@ final class WorkflowExecutor {
             return ["image": .image("Assets/\(artifact.fileURL.lastPathComponent)")]
 
         case .videoGeneration:
-            guard case .text(let prompt) = inputs["prompt"],
+            guard case .text(let prompt) = inputs["prompt"]?.first,
                   let provider = settings.videoProvider(id: node.configuration.providerID)
             else { throw WorkflowExecutionError.invalidValue("生视频节点需要文本提示词和有效服务商") }
             guard let adapter = registry.videoAdapter(id: provider.adapterID) else {
                 throw WorkflowExecutionError.unavailableAdapter(provider.adapterID)
             }
             let key = settings.videoAPIKey(for: provider.id)
-            guard !key.isEmpty else { throw LLMError.missingAPIKey }
-            var referenceURL: URL?
-            if case .image(let relative) = inputs["referenceImage"] {
-                referenceURL = store.runRoot(workflowID: workflow.id, runID: runID)
-                    .appendingPathComponent(relative)
-            }
+            if provider.kind != .pixmax && key.isEmpty { throw LLMError.missingAPIKey }
+            let root = store.runRoot(workflowID: workflow.id, runID: runID)
+            let imageURLs = mediaURLs(inputs["referenceImage"] ?? [], expected: .image, root: root)
+            let videoURLs = mediaURLs(inputs["referenceVideo"] ?? [], expected: .video, root: root)
+            let audioURLs = mediaURLs(inputs["referenceAudio"] ?? [], expected: .audio, root: root)
             let assets = store.assetsDirectory(workflowID: workflow.id, runID: runID)
             let artifact = try await adapter.generate(
                 request: VideoGenerationRequest(
                     prompt: prompt,
                     model: node.configuration.model,
-                    size: node.configuration.mediaSize.isEmpty ? "720x1280" : node.configuration.mediaSize,
+                    aspectRatio: provider.kind == .pixmax
+                        ? (node.configuration.mediaSize.isEmpty ? provider.defaultAspectRatio : node.configuration.mediaSize)
+                        : "auto",
+                    resolution: provider.kind == .pixmax
+                        ? (node.configuration.videoResolution.isEmpty ? "720P" : node.configuration.videoResolution)
+                        : (node.configuration.mediaSize.isEmpty ? "720x1280" : node.configuration.mediaSize),
                     durationSeconds: node.configuration.durationSeconds,
-                    referenceImageURL: referenceURL
+                    includeAudio: node.configuration.includeAudio,
+                    referenceImageURLs: imageURLs,
+                    referenceVideoURLs: videoURLs,
+                    referenceAudioURLs: audioURLs
                 ),
                 provider: provider,
                 apiKey: key,
@@ -555,17 +577,20 @@ final class WorkflowExecutor {
             ) { [weak self] event in
                 await self?.updateProgress(nodeID: node.id, runID: runID, store: store, event: event)
             }
+            for warning in artifact.warnings {
+                appendWarning(warning, runID: runID, store: store)
+            }
             return ["video": .video("Assets/\(artifact.fileURL.lastPathComponent)")]
 
         case .condition:
-            guard case .text(let value) = inputs["value"] else {
+            guard case .text(let value) = inputs["value"]?.first else {
                 throw WorkflowExecutionError.invalidValue("条件节点输入必须是文本")
             }
             let matched = try node.configuration.comparison.evaluate(value, operand: node.configuration.comparisonValue)
             return [matched ? "true" : "false": .text(value)]
 
         case .output:
-            guard let value = inputs["value"] else { throw WorkflowExecutionError.missingInput("结果") }
+            guard let value = inputs["value"]?.first else { throw WorkflowExecutionError.missingInput("结果") }
             return ["value": value]
 
         case .loop:
@@ -588,14 +613,14 @@ final class WorkflowExecutor {
         }
     }
 
-    private func isReady(_ node: WorkflowNode, inputs: [String: WorkflowValue], settings: SettingsStore) -> Bool {
+    private func isReady(_ node: WorkflowNode, inputs: [String: [WorkflowValue]], settings: SettingsStore) -> Bool {
         if node.kind == .runtimeInput { return true }
-        if node.kind == .loop { return inputs["seed"] != nil }
+        if node.kind == .loop { return inputs["seed"]?.isEmpty == false }
         let effective = WorkflowValidator.effectiveNode(node, settings: settings)
         let required = effective.descriptor.ports(for: effective).filter {
             $0.direction == .input && $0.isRequired
         }
-        return required.allSatisfy { inputs[$0.id] != nil }
+        return required.allSatisfy { inputs[$0.id]?.isEmpty == false }
     }
 
     private func propagate(
@@ -603,12 +628,67 @@ final class WorkflowExecutor {
         from nodeID: UUID,
         connections: [WorkflowConnection],
         allowedTargets: Set<UUID>,
-        into inputs: inout [UUID: [String: WorkflowValue]]
+        into inputs: inout [UUID: [String: [WorkflowValue]]]
     ) {
         for connection in connections where connection.sourceNodeID == nodeID && allowedTargets.contains(connection.targetNodeID) {
             guard let value = outputs[connection.sourcePortID] else { continue }
-            inputs[connection.targetNodeID, default: [:]][connection.targetPortID] = value
+            let siblings = connections
+                .filter { $0.targetNodeID == connection.targetNodeID && $0.targetPortID == connection.targetPortID }
+                .sorted {
+                    if $0.targetOrder != $1.targetOrder { return $0.targetOrder < $1.targetOrder }
+                    return $0.id.uuidString < $1.id.uuidString
+                }
+            let desiredIndex = siblings.firstIndex(where: { $0.id == connection.id }) ?? siblings.count
+            var values = inputs[connection.targetNodeID, default: [:]][connection.targetPortID, default: []]
+            values.insert(value, at: min(desiredIndex, values.count))
+            inputs[connection.targetNodeID, default: [:]][connection.targetPortID] = values
         }
+    }
+
+    private func mediaURLs(_ values: [WorkflowValue], expected: WorkflowValueType, root: URL) -> [URL] {
+        values.compactMap { value in
+            guard value.valueType == expected else { return nil }
+            return root.appendingPathComponent(value.payload)
+        }
+    }
+
+    private func prepareRuntimeInputs(
+        _ values: [String: WorkflowValue],
+        workflowID: UUID,
+        runID: UUID,
+        store: WorkflowStore
+    ) throws -> [String: WorkflowValue] {
+        let allowed: [WorkflowValueType: Set<String>] = [
+            .image: ["jpg", "jpeg", "png", "webp", "bmp", "gif"],
+            .video: ["mp4", "mov", "webm", "mkv", "avi"],
+            .audio: ["mp3", "wav", "m4a", "aac", "ogg", "flac"],
+        ]
+        let assets = store.assetsDirectory(workflowID: workflowID, runID: runID)
+        try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+        var result: [String: WorkflowValue] = [:]
+        for (key, value) in values {
+            guard value.valueType != .text else {
+                result[key] = value
+                continue
+            }
+            let source = URL(fileURLWithPath: value.payload)
+            guard source.isFileURL,
+                  FileManager.default.isReadableFile(atPath: source.path),
+                  allowed[value.valueType]?.contains(source.pathExtension.lowercased()) == true
+            else {
+                throw WorkflowExecutionError.invalidValue("运行输入媒体不可读或文件类型不受支持：\(source.lastPathComponent)")
+            }
+            let target = assets.appendingPathComponent("input-\(UUID().uuidString)-\(source.lastPathComponent)")
+            try FileManager.default.copyItem(at: source, to: target)
+            let relative = "Assets/\(target.lastPathComponent)"
+            switch value {
+            case .image: result[key] = .image(relative)
+            case .video: result[key] = .video(relative)
+            case .audio: result[key] = .audio(relative)
+            case .text: result[key] = value
+            }
+        }
+        return result
     }
 
     /// 创建时间相同也使用 UUID 收尾，保证多个就绪分支每次都以相同顺序串行执行。

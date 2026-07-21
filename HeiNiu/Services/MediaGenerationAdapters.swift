@@ -11,6 +11,22 @@ struct MediaAdapterFieldDescriptor: Identifiable, Hashable, Sendable {
     var isRequired: Bool
 }
 
+/// 单个生视频模型的内置能力，避免向服务商提交未知或不兼容的付费任务。
+struct VideoModelCapability: Identifiable, Hashable, Sendable {
+    var id: String { model }
+    var model: String
+    var displayName: String
+    var aspectRatios: [String]
+    var resolutions: [String]
+    var durations: [Int]
+    var supportsAudioGeneration: Bool
+    var maximumReferenceImages: Int
+    var maximumReferenceVideos: Int
+    var maximumReferenceAudios: Int
+    /// PixMax 请求中的 `referModel`；空值表示由素材组合自动选择。
+    var referenceMode: String?
+}
+
 /// 适配器提供给设置页、节点检查器和帮助页的能力描述。
 struct MediaAdapterDescriptor: Identifiable, Hashable, Sendable {
     var id: String
@@ -23,7 +39,19 @@ struct MediaAdapterDescriptor: Identifiable, Hashable, Sendable {
     var supportsReferenceImage: Bool
     var supportsImageEditing: Bool = false
     var supportsMaskImage: Bool = false
+    var supportsReferenceVideo: Bool = false
+    var supportsReferenceAudio: Bool = false
+    var maximumReferenceImages: Int = 1
+    var maximumReferenceVideos: Int = 0
+    var maximumReferenceAudios: Int = 0
+    var supportsAudioGeneration: Bool = false
+    var modelCapabilities: [VideoModelCapability] = []
     var usageNotes: [String]
+
+    /// 按服务商模型标识查询更精确的能力。
+    func videoCapability(for model: String) -> VideoModelCapability? {
+        modelCapabilities.first { $0.model == model }
+    }
 }
 
 /// 媒体生成进度事件。
@@ -38,6 +66,8 @@ struct MediaArtifact: Hashable, Sendable {
     var fileURL: URL
     var mimeType: String
     var remoteJobID: String?
+    var additionalFileURLs: [URL] = []
+    var warnings: [String] = []
 }
 
 /// 生图适配器的统一请求。
@@ -54,9 +84,54 @@ struct ImageGenerationRequest: Hashable, Sendable {
 struct VideoGenerationRequest: Hashable, Sendable {
     var prompt: String
     var model: String
-    var size: String
+    var aspectRatio: String
+    var resolution: String
     var durationSeconds: Int
-    var referenceImageURL: URL?
+    var includeAudio: Bool
+    var referenceImageURLs: [URL]
+    var referenceVideoURLs: [URL]
+    var referenceAudioURLs: [URL]
+
+    init(
+        prompt: String,
+        model: String,
+        aspectRatio: String,
+        resolution: String,
+        durationSeconds: Int,
+        includeAudio: Bool,
+        referenceImageURLs: [URL] = [],
+        referenceVideoURLs: [URL] = [],
+        referenceAudioURLs: [URL] = []
+    ) {
+        self.prompt = prompt
+        self.model = model
+        self.aspectRatio = aspectRatio
+        self.resolution = resolution
+        self.durationSeconds = durationSeconds
+        self.includeAudio = includeAudio
+        self.referenceImageURLs = referenceImageURLs
+        self.referenceVideoURLs = referenceVideoURLs
+        self.referenceAudioURLs = referenceAudioURLs
+    }
+
+    /// 兼容旧单参考图调用；旧 `size` 映射为分辨率。
+    init(
+        prompt: String,
+        model: String,
+        size: String,
+        durationSeconds: Int,
+        referenceImageURL: URL?
+    ) {
+        self.init(
+            prompt: prompt,
+            model: model,
+            aspectRatio: "auto",
+            resolution: size,
+            durationSeconds: durationSeconds,
+            includeAudio: false,
+            referenceImageURLs: referenceImageURL.map { [$0] } ?? []
+        )
+    }
 }
 
 /// 媒体适配器错误。
@@ -110,7 +185,7 @@ protocol VideoGenerationAdapter: Sendable {
 struct MediaAdapterRegistry: Sendable {
     static let shared = MediaAdapterRegistry(
         imageAdapters: [OpenAIImageGenerationAdapter()],
-        videoAdapters: [OpenAIVideoGenerationAdapter()]
+        videoAdapters: [OpenAIVideoGenerationAdapter(), PixmaxVideoGenerationAdapter()]
     )
 
     private let imageAdapters: [String: any ImageGenerationAdapter]
@@ -324,9 +399,9 @@ struct OpenAIVideoGenerationAdapter: VideoGenerationAdapter {
         var body = Data()
         appendField("model", value: request.model, boundary: boundary, to: &body)
         appendField("prompt", value: request.prompt, boundary: boundary, to: &body)
-        appendField("size", value: request.size, boundary: boundary, to: &body)
+        appendField("size", value: request.resolution, boundary: boundary, to: &body)
         appendField("seconds", value: String(request.durationSeconds), boundary: boundary, to: &body)
-        if let reference = request.referenceImageURL {
+        if let reference = request.referenceImageURLs.first {
             let data = try Data(contentsOf: reference)
             appendFile(
                 "input_reference",

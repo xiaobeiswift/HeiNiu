@@ -13,6 +13,8 @@ enum VideoProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
     case openAICompatible
     /// 自定义 HTTP 端点（可填任意 Base URL / 模型名）
     case generic
+    /// PixMax 原生画布生视频接口。
+    case pixmax
 
     /// 唯一标识符。
     var id: String { rawValue }
@@ -22,6 +24,7 @@ enum VideoProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAICompatible: VideoProvider.openAIAdapterID
         case .generic: VideoProvider.unconfiguredGenericAdapterID
+        case .pixmax: VideoProvider.pixmaxAdapterID
         }
     }
 
@@ -30,6 +33,7 @@ enum VideoProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAICompatible: "OpenAI 兼容"
         case .generic: "通用 HTTP"
+        case .pixmax: "PixMax"
         }
     }
 
@@ -38,6 +42,7 @@ enum VideoProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAICompatible: "视频生成兼容网关"
         case .generic: "自定义 API"
+        case .pixmax: "原生登录 · 画布生成"
         }
     }
 
@@ -46,6 +51,7 @@ enum VideoProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAICompatible: "https://api.openai.com/v1"
         case .generic: ""
+        case .pixmax: "https://console.pixmax.ai"
         }
     }
 
@@ -54,7 +60,13 @@ enum VideoProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
         switch self {
         case .openAICompatible: ["sora-2", "sora-2-pro"]
         case .generic: []
+        case .pixmax: VideoProvider.pixmaxModels
         }
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? ""
+        self = Self(rawValue: raw) ?? .openAICompatible
     }
 }
 
@@ -64,6 +76,16 @@ struct VideoProvider: Identifiable, Codable, Hashable {
     static let openAIAdapterID = "openai.videos.v1"
     /// 旧通用 HTTP 配置迁移后的占位 ID；实现适配器前不可执行。
     static let unconfiguredGenericAdapterID = "generic.unconfigured"
+    /// PixMax 画布生视频源码适配器 ID。
+    static let pixmaxAdapterID = "pixmax.canvas.video.v1"
+    /// 由 PixMax 当前画布接口支持的只读模型目录。
+    static let pixmaxModels = [
+        "PIXDANCE_2_FAST", "PIXDANCE_2", "SEEDANCE_1_5", "KLING_V3_OMNI",
+        "KLING_V3", "KLING_O1", "KLING_2_6", "PIXVERSE_V6", "VEO31",
+        "VEO31_FAST", "VEO31_PREVIEW", "HAILUO_23", "HAILUO_02",
+        "VIDU_Q3_PRO", "VIDU_Q2_PRO", "VIDU_Q3_MIX", "WAN2_6",
+        "SORA_2_PRO", "SORA_2",
+    ]
     /// 唯一标识符。
     var id: UUID
     /// 显示名称。
@@ -83,7 +105,7 @@ struct VideoProvider: Identifiable, Codable, Hashable {
     /// 默认时长（秒）
     var defaultDurationSeconds: Int
 
-    static let availableAspectRatios = ["9:16", "16:9", "1:1"]
+    static let availableAspectRatios = ["auto", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
     static let availableDurations = [4, 8, 12, 16, 20]
 
     /// 初始化方法
@@ -115,7 +137,18 @@ struct VideoProvider: Identifiable, Codable, Hashable {
     var effectiveBaseURL: String {
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return kind.defaultBaseURL }
-        return trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
+        let normalized = trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
+        // app.pixmax.ai 目前会按地域 301 到 .cn，POST 登录在跳转时会丢失；
+        // 兼容已经保存过该旧默认值的配置，国际版统一走当前前端入口。
+        if kind == .pixmax && normalized == "https://app.pixmax.ai" {
+            return "https://console.pixmax.ai"
+        }
+        return normalized
+    }
+
+    /// PixMax 心跳与生成是否启用；其他服务商始终视为启用。
+    var isEnabled: Bool {
+        kind != .pixmax || adapterSettings["enabled"] == "true"
     }
 
     /// 初始化方法
@@ -125,13 +158,13 @@ struct VideoProvider: Identifiable, Codable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? "未命名生视频服务商"
-        kind = try container.decodeIfPresent(VideoProviderKind.self, forKey: .kind) ?? .openAICompatible
-        adapterID = try container.decodeIfPresent(String.self, forKey: .adapterID) ?? kind.adapterID
-        adapterSettings = try container.decodeIfPresent([String: String].self, forKey: .adapterSettings) ?? [:]
-        baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? kind.defaultBaseURL
-        models = try container.decodeIfPresent([String].self, forKey: .models) ?? kind.defaultModels
-        defaultAspectRatio = try container.decodeIfPresent(String.self, forKey: .defaultAspectRatio) ?? "9:16"
-        defaultDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .defaultDurationSeconds) ?? 4
+        kind = (try? container.decodeIfPresent(VideoProviderKind.self, forKey: .kind)) ?? .openAICompatible
+        adapterID = (try? container.decodeIfPresent(String.self, forKey: .adapterID)) ?? kind.adapterID
+        adapterSettings = (try? container.decodeIfPresent([String: String].self, forKey: .adapterSettings)) ?? [:]
+        baseURL = (try? container.decodeIfPresent(String.self, forKey: .baseURL)) ?? kind.defaultBaseURL
+        models = (try? container.decodeIfPresent([String].self, forKey: .models)) ?? kind.defaultModels
+        defaultAspectRatio = (try? container.decodeIfPresent(String.self, forKey: .defaultAspectRatio)) ?? "9:16"
+        defaultDurationSeconds = (try? container.decodeIfPresent(Int.self, forKey: .defaultDurationSeconds)) ?? 4
     }
 
     /// CodingKeys

@@ -593,6 +593,7 @@ private extension WorkflowValueType {
         case .text: .blue
         case .image: .pink
         case .video: .cyan
+        case .audio: .orange
         case .any: AppTheme.accent
         }
     }

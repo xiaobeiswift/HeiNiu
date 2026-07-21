@@ -22,6 +22,7 @@
 - <doc:DataStorage>
 - <doc:SettingsAndProviders>
 - <doc:Workflows>
+- <doc:PixmaxNativeVideo>
 
 ## 代码地图
 

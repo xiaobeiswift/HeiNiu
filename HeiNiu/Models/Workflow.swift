@@ -67,6 +67,7 @@ enum WorkflowValueType: String, Codable, Hashable {
     case text
     case image
     case video
+    case audio
     case any
 
     /// 中文显示名称。
@@ -75,6 +76,7 @@ enum WorkflowValueType: String, Codable, Hashable {
         case .text: "文本"
         case .image: "图片"
         case .video: "视频"
+        case .audio: "音频"
         case .any: "任意结果"
         }
     }
@@ -99,6 +101,8 @@ struct WorkflowPortDescriptor: Identifiable, Hashable {
     var valueType: WorkflowValueType
     var isRequired: Bool
     var help: String
+    /// 该输入端口允许的最大连线数；输出端口固定为一条值流。
+    var maxConnections: Int = 1
 }
 
 /// 节点完整中文操作指南。
@@ -125,7 +129,8 @@ struct WorkflowNodeDescriptor: Identifiable, Hashable {
     func ports(for node: WorkflowNode) -> [WorkflowPortDescriptor] {
         switch kind {
         case .runtimeInput:
-            return [Self.output("text", "文本", .text, "本次运行填写的文本参数。")]
+            let type = node.configuration.runtimeInputType
+            return [Self.output(type.rawValue, type.title, type.valueType, "本次运行选择或填写的\(type.title)参数。")]
         case .promptTemplate:
             let names = node.configuration.templateVariables
             let inputs = names.map {
@@ -156,7 +161,9 @@ struct WorkflowNodeDescriptor: Identifiable, Hashable {
         case .videoGeneration:
             return [
                 Self.input("prompt", "提示词", .text, true, "描述镜头、动作、场景与光线的文本。"),
-                Self.input("referenceImage", "参考图", .image, false, "可选首帧参考图；适配器不支持时会在运行前提示。"),
+                Self.input("referenceImage", "参考图片", .image, false, "按连线顺序传入最多 9 张参考图片。", maxConnections: 9),
+                Self.input("referenceVideo", "参考视频", .video, false, "按连线顺序传入最多 3 段参考视频。", maxConnections: 3),
+                Self.input("referenceAudio", "参考音频", .audio, false, "按连线顺序传入最多 3 段参考音频。", maxConnections: 3),
                 Self.output("video", "视频", .video, "已下载到本地运行目录的 MP4。"),
             ]
         case .condition:
@@ -184,9 +191,18 @@ struct WorkflowNodeDescriptor: Identifiable, Hashable {
         _ title: String,
         _ type: WorkflowValueType,
         _ required: Bool,
-        _ help: String
+        _ help: String,
+        maxConnections: Int = 1
     ) -> WorkflowPortDescriptor {
-        WorkflowPortDescriptor(id: id, title: title, direction: .input, valueType: type, isRequired: required, help: help)
+        WorkflowPortDescriptor(
+            id: id,
+            title: title,
+            direction: .input,
+            valueType: type,
+            isRequired: required,
+            help: help,
+            maxConnections: max(1, maxConnections)
+        )
     }
 
     private static func output(
@@ -196,6 +212,39 @@ struct WorkflowNodeDescriptor: Identifiable, Hashable {
         _ help: String
     ) -> WorkflowPortDescriptor {
         WorkflowPortDescriptor(id: id, title: title, direction: .output, valueType: type, isRequired: false, help: help)
+    }
+}
+
+/// 运行前输入节点接受的值类型。
+enum WorkflowRuntimeInputType: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
+    case text
+    case image
+    case video
+    case audio
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .text: "文本"
+        case .image: "图片"
+        case .video: "视频"
+        case .audio: "音频"
+        }
+    }
+
+    var valueType: WorkflowValueType {
+        switch self {
+        case .text: .text
+        case .image: .image
+        case .video: .video
+        case .audio: .audio
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let raw = (try? decoder.singleValueContainer().decode(String.self)) ?? "text"
+        self = Self(rawValue: raw) ?? .text
     }
 }
 
@@ -320,11 +369,11 @@ enum WorkflowNodeCatalog {
                 systemImage: "video.badge.waveform",
                 tint: .cyan,
                 usage: NodeUsageGuide(
-                    purpose: "从镜头提示词生成视频，可在适配器支持时把上游图片作为首帧参考。",
-                    setupSteps: ["在设置中配置生视频服务商和 Key。", "选择适配器支持的模型、尺寸与时长。", "连接提示词，并可选连接参考图片。"],
-                    connectionExample: "LLM「回答」 → 生视频「提示词」；生图「图片」 → 生视频「参考图」",
-                    resultDescription: "显示排队与生成进度，完成后把 MP4 下载到 Assets 目录。",
-                    commonErrors: ["所选适配器不支持参考图。", "任务失败、过期或轮询超时。", "远端完成后媒体下载失败。"],
+                    purpose: "从镜头提示词生成视频，并按适配器能力接收有序的参考图片、视频和音频。",
+                    setupSteps: ["在设置中配置生视频服务商；PixMax 需先启用并登录。", "选择适配器支持的模型、画幅、分辨率与时长。", "连接提示词，并按需连接参考图片、视频或音频。"],
+                    connectionExample: "LLM「回答」 → 生视频「提示词」；多个媒体输入 → 对应参考端口，连线顺序就是素材编号",
+                    resultDescription: "显示排队与生成进度，完成后把主视频和额外结果下载到本次运行的 Assets 目录。",
+                    commonErrors: ["模型不支持当前参考素材组合。", "PixMax 登录已失效或网络异常。", "任务失败或远端完成后媒体下载失败。"],
                     warnings: ["视频生成耗时较长且费用较高。停止本地轮询不一定取消远端任务。"]
                 )
             ),
@@ -365,10 +414,10 @@ enum WorkflowNodeCatalog {
                 systemImage: "square.and.arrow.down",
                 tint: .gray,
                 usage: NodeUsageGuide(
-                    purpose: "作为工作流终点，接收文本、图片或视频并在运行检查器中展示。",
+                    purpose: "作为工作流终点，接收文本、图片、视频或音频并在运行检查器中展示。",
                     setupSteps: ["连接需要保留的最终结果。", "运行后在运行标签或历史记录中打开结果。"],
                     connectionExample: "LLM / 生图 / 生视频 / 循环完成 → 结果输出",
-                    resultDescription: "文本可复制；图片可预览；视频可播放；媒体可在 Finder 中定位。",
+                    resultDescription: "文本可复制；图片可预览；视频和音频可播放；媒体可在 Finder 中定位。",
                     commonErrors: ["没有连接任何上游结果。", "上游分支未命中时本节点会被跳过。"],
                     warnings: []
                 )
@@ -461,6 +510,7 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
     var text: String = ""
     var parameterName: String = "输入"
     var isRequired: Bool = true
+    var runtimeInputType: WorkflowRuntimeInputType = .text
     var usesPromptLibrary: Bool = false
     var promptItemID: UUID?
     var promptSnapshot: String = ""
@@ -477,7 +527,9 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
     var maxIterations: Int = 3
     var imageOperation: WorkflowImageOperation = .generate
     var mediaSize: String = ""
+    var videoResolution: String = ""
     var durationSeconds: Int = 4
+    var includeAudio: Bool = false
 
     /// 从当前模板提取去重后的 `{{variable}}`。
     var templateVariables: [String] {
@@ -501,6 +553,7 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
         text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
         parameterName = try container.decodeIfPresent(String.self, forKey: .parameterName) ?? "输入"
         isRequired = try container.decodeIfPresent(Bool.self, forKey: .isRequired) ?? true
+        runtimeInputType = (try? container.decodeIfPresent(WorkflowRuntimeInputType.self, forKey: .runtimeInputType)) ?? .text
         usesPromptLibrary = try container.decodeIfPresent(Bool.self, forKey: .usesPromptLibrary) ?? false
         promptItemID = try container.decodeIfPresent(UUID.self, forKey: .promptItemID)
         promptSnapshot = try container.decodeIfPresent(String.self, forKey: .promptSnapshot) ?? ""
@@ -517,7 +570,9 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
         maxIterations = min(20, max(1, try container.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 3))
         imageOperation = (try? container.decodeIfPresent(WorkflowImageOperation.self, forKey: .imageOperation)) ?? .generate
         mediaSize = try container.decodeIfPresent(String.self, forKey: .mediaSize) ?? ""
+        videoResolution = try container.decodeIfPresent(String.self, forKey: .videoResolution) ?? ""
         durationSeconds = try container.decodeIfPresent(Int.self, forKey: .durationSeconds) ?? 4
+        includeAudio = try container.decodeIfPresent(Bool.self, forKey: .includeAudio) ?? false
     }
 }
 
@@ -569,19 +624,23 @@ struct WorkflowConnection: Identifiable, Codable, Hashable {
     var sourcePortID: String
     var targetNodeID: UUID
     var targetPortID: String
+    /// 同一目标端口内的稳定素材顺序，从零开始。
+    var targetOrder: Int
 
     init(
         id: UUID = UUID(),
         sourceNodeID: UUID,
         sourcePortID: String,
         targetNodeID: UUID,
-        targetPortID: String
+        targetPortID: String,
+        targetOrder: Int = 0
     ) {
         self.id = id
         self.sourceNodeID = sourceNodeID
         self.sourcePortID = sourcePortID
         self.targetNodeID = targetNodeID
         self.targetPortID = targetPortID
+        self.targetOrder = max(0, targetOrder)
     }
 
     init(from decoder: Decoder) throws {
@@ -591,6 +650,7 @@ struct WorkflowConnection: Identifiable, Codable, Hashable {
         sourcePortID = try container.decodeIfPresent(String.self, forKey: .sourcePortID) ?? ""
         targetNodeID = try container.decodeIfPresent(UUID.self, forKey: .targetNodeID) ?? UUID()
         targetPortID = try container.decodeIfPresent(String.self, forKey: .targetPortID) ?? ""
+        targetOrder = max(0, try container.decodeIfPresent(Int.self, forKey: .targetOrder) ?? 0)
     }
 }
 
@@ -622,7 +682,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
     var createdAt: Date
     var updatedAt: Date
 
-    static let currentFormatVersion = 1
+    static let currentFormatVersion = 2
 
     init(
         id: UUID = UUID(),
@@ -645,7 +705,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        formatVersion = try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
+        formatVersion = max(Self.currentFormatVersion, try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? "未命名工作流"
         nodes = try container.decodeIfPresent([WorkflowNode].self, forKey: .nodes) ?? []
@@ -683,18 +743,20 @@ enum WorkflowValue: Codable, Hashable, Sendable {
     case text(String)
     case image(String)
     case video(String)
+    case audio(String)
 
     var valueType: WorkflowValueType {
         switch self {
         case .text: .text
         case .image: .image
         case .video: .video
+        case .audio: .audio
         }
     }
 
     var payload: String {
         switch self {
-        case .text(let value), .image(let value), .video(let value): value
+        case .text(let value), .image(let value), .video(let value), .audio(let value): value
         }
     }
 
@@ -707,6 +769,7 @@ enum WorkflowValue: Codable, Hashable, Sendable {
         switch type {
         case "image": self = .image(value)
         case "video": self = .video(value)
+        case "audio": self = .audio(value)
         default: self = .text(value)
         }
     }
@@ -798,19 +861,19 @@ struct WorkflowRun: Identifiable, Codable, Hashable, Sendable {
     var workflowID: UUID
     var targetNodeID: UUID?
     var status: WorkflowRunStatus
-    var runtimeInputs: [String: String]
+    var runtimeInputs: [String: WorkflowValue]
     var nodeRuns: [WorkflowNodeRun]
     var warnings: [String]
     var startedAt: Date
     var endedAt: Date?
 
-    static let currentFormatVersion = 1
+    static let currentFormatVersion = 2
 
     init(
         id: UUID = UUID(),
         workflowID: UUID,
         targetNodeID: UUID?,
-        runtimeInputs: [String: String],
+        runtimeInputs: [String: WorkflowValue],
         nodes: [WorkflowNode]
     ) {
         formatVersion = Self.currentFormatVersion
@@ -826,12 +889,18 @@ struct WorkflowRun: Identifiable, Codable, Hashable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        formatVersion = try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
+        formatVersion = max(Self.currentFormatVersion, try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         workflowID = try container.decodeIfPresent(UUID.self, forKey: .workflowID) ?? UUID()
         targetNodeID = try container.decodeIfPresent(UUID.self, forKey: .targetNodeID)
         status = try container.decodeIfPresent(WorkflowRunStatus.self, forKey: .status) ?? .failed
-        runtimeInputs = try container.decodeIfPresent([String: String].self, forKey: .runtimeInputs) ?? [:]
+        if let values = try? container.decode([String: WorkflowValue].self, forKey: .runtimeInputs) {
+            runtimeInputs = values
+        } else if let legacy = try? container.decode([String: String].self, forKey: .runtimeInputs) {
+            runtimeInputs = legacy.mapValues(WorkflowValue.text)
+        } else {
+            runtimeInputs = [:]
+        }
         nodeRuns = try container.decodeIfPresent([WorkflowNodeRun].self, forKey: .nodeRuns) ?? []
         warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
         startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()

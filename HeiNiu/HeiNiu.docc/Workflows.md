@@ -10,7 +10,9 @@
 
 ## 节点与端口
 
-内置节点包括运行时输入、提示词模板、知识检索、LLM、生图、生视频、条件分支、显式循环和结果输出。端口类型为文本、图片、视频或任意值；输入端口最多接受一条连接，输出端口可以分支。
+内置节点包括运行时输入、提示词模板、知识检索、LLM、生图、生视频、条件分支、显式循环和结果输出。端口类型为文本、图片、视频、音频或任意值；普通输入端口最多接受一条连接，显式声明 `maxConnections` 的参考素材端口可接受多条有序连接。
+
+运行时输入支持文本、图片、视频和音频。媒体通过 macOS 原生文件选择器选取，执行前校验类型和可读性，然后复制到本次运行的 `Assets/`；`run.json` 只保存相对路径。
 
 提示词模板根据 `{{variable}}` 自动生成文本输入端口。模板可绑定提示词库条目；条目删除后继续使用节点保存的快照，并在检查器和运行记录中提示。
 
@@ -28,8 +30,10 @@
 
 ``ImageGenerationAdapter`` 与 ``VideoGenerationAdapter`` 把不同服务协议统一为生成请求、进度事件和本地媒体产物。``MediaAdapterRegistry`` 提供源码内注册入口，并把支持的模型、尺寸、时长、参考素材和限制动态补充到节点帮助中。
 
-内置 OpenAI Images 支持 `/images/generations` 文生图和 `/images/edits` 原图/遮罩编辑，OpenAI Videos 支持异步视频生成。API Key 只从钥匙串读取，永不进入节点配置、帮助、日志或 `run.json`。未知 `adapterID` 会原样保留，以便安装包含该适配器的新版本后恢复，但当前不可执行。
+内置 OpenAI Images 支持 `/images/generations` 文生图和 `/images/edits` 原图/遮罩编辑，OpenAI Videos 支持异步视频生成。PixMax 适配器原生支持最多 9 张图片、3 段视频和 3 段音频，按 `targetOrder` 稳定编号，并在提交前校验模型的画幅、分辨率、时长与音频能力。
+
+API Key 和 PixMax Cookie 只从钥匙串读取，永不进入节点配置、帮助、日志或 `run.json`。未知 `adapterID` 会原样保留，以便安装包含该适配器的新版本后恢复，但当前不可执行。
 
 ## 持久化
 
-定义保存在 `Workflows/workflows.json`，运行历史位于 `Workflows/Runs/<workflowID>/<runID>/`。`run.json` 保存节点状态和文本，`Assets/` 保存图片与视频。历史不自动清理，也不进入普通设置备份。
+定义保存在 `Workflows/workflows.json`，运行历史位于 `Workflows/Runs/<workflowID>/<runID>/`。`run.json` 保存节点状态和文本，`Assets/` 保存图片、视频与音频。历史不自动清理，也不进入普通设置备份。

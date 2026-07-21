@@ -143,8 +143,19 @@ private struct WorkflowNodeConfigurationView: View {
             inspectorSection("运行参数") {
                 TextField("参数名称", text: $draft.configuration.parameterName)
                     .textFieldStyle(.roundedBorder)
+                Picker("输入类型", selection: $draft.configuration.runtimeInputType) {
+                    ForEach(WorkflowRuntimeInputType.allCases) { type in
+                        Text(type.title).tag(type)
+                    }
+                }
                 Toggle("必填", isOn: $draft.configuration.isRequired)
-                labeledEditor("默认值", text: $draft.configuration.text, minHeight: 100)
+                if draft.configuration.runtimeInputType == .text {
+                    labeledEditor("默认值", text: $draft.configuration.text, minHeight: 100)
+                } else {
+                    Text("每次运行时使用原生文件选择器选择一个\(draft.configuration.runtimeInputType.title)文件。")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.textTertiary)
+                }
             }
 
         case .promptTemplate:
@@ -240,15 +251,32 @@ private struct WorkflowNodeConfigurationView: View {
             inspectorSection("生视频服务") {
                 videoProviderPicker
                 modelPicker(models: selectedVideoProvider?.models ?? [])
-                Picker("尺寸", selection: $draft.configuration.mediaSize) {
-                    ForEach(selectedVideoAdapter?.supportedSizes ?? ["720x1280", "1280x720"], id: \.self) { size in
-                        Text(size).tag(size)
+                    .onChange(of: draft.configuration.model) { _, _ in applyVideoCapabilityDefaults() }
+                if selectedVideoProvider?.kind == .pixmax {
+                    Picker("画幅", selection: $draft.configuration.mediaSize) {
+                        ForEach(selectedVideoCapability?.aspectRatios ?? VideoProvider.availableAspectRatios, id: \.self) { ratio in
+                            Text(ratio).tag(ratio)
+                        }
+                    }
+                    Picker("分辨率", selection: $draft.configuration.videoResolution) {
+                        ForEach(selectedVideoCapability?.resolutions ?? ["720P"], id: \.self) { resolution in
+                            Text(resolution).tag(resolution)
+                        }
+                    }
+                } else {
+                    Picker("尺寸", selection: $draft.configuration.mediaSize) {
+                        ForEach(selectedVideoAdapter?.supportedSizes ?? ["720x1280", "1280x720"], id: \.self) { size in
+                            Text(size).tag(size)
+                        }
                     }
                 }
                 Picker("时长", selection: $draft.configuration.durationSeconds) {
-                    ForEach(selectedVideoAdapter?.supportedDurations ?? [4, 8, 12], id: \.self) { seconds in
+                    ForEach(selectedVideoCapability?.durations ?? selectedVideoAdapter?.supportedDurations ?? [4, 8, 12], id: \.self) { seconds in
                         Text("\(seconds) 秒").tag(seconds)
                     }
+                }
+                if selectedVideoCapability?.supportsAudioGeneration == true || selectedVideoAdapter?.supportsAudioGeneration == true {
+                    Toggle("同时生成音频", isOn: $draft.configuration.includeAudio)
                 }
                 adapterStatus(selectedVideoAdapter, id: selectedVideoProvider?.adapterID)
             }
@@ -267,7 +295,7 @@ private struct WorkflowNodeConfigurationView: View {
 
         case .output:
             inspectorSection("结果行为") {
-                Text("文本、图片或视频由上游端口决定。运行后可在“运行”标签复制、预览或打开。")
+                Text("文本、图片、视频或音频由上游端口决定。运行后可在“运行”标签复制、预览、播放或打开。")
                     .font(.callout)
                     .foregroundStyle(AppTheme.textSecondary)
             }
@@ -302,6 +330,9 @@ private struct WorkflowNodeConfigurationView: View {
         guard let id = selectedVideoProvider?.adapterID else { return nil }
         return MediaAdapterRegistry.shared.videoAdapter(id: id)?.descriptor
     }
+    private var selectedVideoCapability: VideoModelCapability? {
+        selectedVideoAdapter?.videoCapability(for: draft.configuration.model)
+    }
 
     private var llmProviderPicker: some View {
         Picker("服务商", selection: $draft.configuration.providerID) {
@@ -329,8 +360,7 @@ private struct WorkflowNodeConfigurationView: View {
         }
         .onChange(of: draft.configuration.providerID) { _, _ in
             ensureModel(selectedVideoProvider?.models ?? [])
-            if let size = selectedVideoAdapter?.supportedSizes.first { draft.configuration.mediaSize = size }
-            if let duration = selectedVideoAdapter?.supportedDurations.first { draft.configuration.durationSeconds = duration }
+            applyVideoCapabilityDefaults()
         }
     }
 
@@ -343,6 +373,30 @@ private struct WorkflowNodeConfigurationView: View {
 
     private func ensureModel(_ models: [String]) {
         if !models.contains(draft.configuration.model) { draft.configuration.model = models.first ?? "" }
+    }
+
+    private func applyVideoCapabilityDefaults() {
+        if selectedVideoProvider?.kind == .pixmax, let capability = selectedVideoCapability {
+            if !capability.aspectRatios.contains(draft.configuration.mediaSize) {
+                draft.configuration.mediaSize = capability.aspectRatios.first ?? "auto"
+            }
+            if !capability.resolutions.contains(draft.configuration.videoResolution) {
+                draft.configuration.videoResolution = capability.resolutions.first ?? ""
+            }
+            if !capability.durations.contains(draft.configuration.durationSeconds) {
+                draft.configuration.durationSeconds = capability.durations.first ?? 4
+            }
+            if !capability.supportsAudioGeneration { draft.configuration.includeAudio = false }
+        } else {
+            if draft.configuration.mediaSize.isEmpty || !((selectedVideoAdapter?.supportedSizes ?? []).contains(draft.configuration.mediaSize)) {
+                draft.configuration.mediaSize = selectedVideoAdapter?.supportedSizes.first ?? "720x1280"
+            }
+            if let durations = selectedVideoAdapter?.supportedDurations,
+               !durations.isEmpty,
+               !durations.contains(draft.configuration.durationSeconds) {
+                draft.configuration.durationSeconds = durations[0]
+            }
+        }
     }
 
     private func comparisonConfiguration(title: String) -> some View {
@@ -779,6 +833,16 @@ private struct WorkflowRunInspectorView: View {
                     artifactButtons(url)
                 } else {
                     Label("视频文件不存在", systemImage: "video.badge.exclamationmark")
+                        .foregroundStyle(AppTheme.danger)
+                }
+            case .audio:
+                if let url = store.artifactURL(for: value, run: run) {
+                    VideoPlayer(player: AVPlayer(url: url))
+                        .frame(height: 72)
+                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                    artifactButtons(url)
+                } else {
+                    Label("音频文件不存在", systemImage: "waveform.badge.exclamationmark")
                         .foregroundStyle(AppTheme.danger)
                 }
             }

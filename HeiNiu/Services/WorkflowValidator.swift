@@ -91,7 +91,7 @@ enum WorkflowValidator {
             case .imageGeneration:
                 validateImage(node, settings: settings, registry: registry, issues: &issues)
             case .videoGeneration:
-                validateVideo(node, settings: settings, registry: registry, issues: &issues)
+                validateVideo(node, workflow: workflow, settings: settings, registry: registry, issues: &issues)
             case .condition:
                 validateComparison(node, issues: &issues)
             case .loop:
@@ -139,6 +139,20 @@ enum WorkflowValidator {
                !adapter.descriptor.supportsReferenceImage {
                 issues.append(error("所选生视频适配器不支持参考图片", target.id))
             }
+            if target.kind == .videoGeneration,
+               targetPort.id == "referenceVideo",
+               let provider = settings.videoProvider(id: target.configuration.providerID),
+               let adapter = registry.videoAdapter(id: provider.adapterID),
+               !adapter.descriptor.supportsReferenceVideo {
+                issues.append(error("所选生视频适配器不支持参考视频", target.id))
+            }
+            if target.kind == .videoGeneration,
+               targetPort.id == "referenceAudio",
+               let provider = settings.videoProvider(id: target.configuration.providerID),
+               let adapter = registry.videoAdapter(id: provider.adapterID),
+               !adapter.descriptor.supportsReferenceAudio {
+                issues.append(error("所选生视频适配器不支持参考音频", target.id))
+            }
             if target.kind == .imageGeneration,
                targetPort.id == "maskImage",
                let provider = settings.imageProvider(id: target.configuration.providerID),
@@ -148,8 +162,8 @@ enum WorkflowValidator {
             }
             let key = "\(target.id.uuidString)|\(targetPort.id)"
             targetCounts[key, default: 0] += 1
-            if targetCounts[key, default: 0] > 1 {
-                issues.append(error("输入端口“\(targetPort.title)”连接了多条线", target.id))
+            if targetCounts[key, default: 0] > targetPort.maxConnections {
+                issues.append(error("输入端口“\(targetPort.title)”最多连接 \(targetPort.maxConnections) 条线", target.id))
             }
         }
 
@@ -241,6 +255,7 @@ enum WorkflowValidator {
 
     private static func validateVideo(
         _ node: WorkflowNode,
+        workflow: WorkflowDefinition,
         settings: SettingsStore,
         registry: MediaAdapterRegistry,
         issues: inout [WorkflowValidationIssue]
@@ -253,16 +268,46 @@ enum WorkflowValidator {
             issues.append(error("生视频适配器“\(provider.adapterID)”未注册", node.id))
             return
         }
+        if provider.kind == .pixmax && !provider.isEnabled {
+            issues.append(error("“\(provider.name)”尚未启用 PixMax", node.id))
+        }
         if settings.videoAPIKey(for: provider.id).isEmpty {
-            issues.append(error("“\(provider.name)”还没有配置 API Key", node.id))
+            let message = provider.kind == .pixmax
+                ? "“\(provider.name)”尚未登录 PixMax"
+                : "“\(provider.name)”还没有配置 API Key"
+            issues.append(error(message, node.id))
         }
         if node.configuration.model.isEmpty { issues.append(error("生视频节点还没有选择模型", node.id)) }
-        let size = node.configuration.mediaSize.isEmpty ? "720x1280" : node.configuration.mediaSize
+        let size = provider.kind == .pixmax
+            ? (node.configuration.videoResolution.isEmpty ? "720P" : node.configuration.videoResolution)
+            : (node.configuration.mediaSize.isEmpty ? "720x1280" : node.configuration.mediaSize)
         if !adapter.descriptor.supportedSizes.isEmpty && !adapter.descriptor.supportedSizes.contains(size) {
-            issues.append(error("生视频适配器不支持尺寸 \(size)", node.id))
+            issues.append(error("生视频适配器不支持分辨率 \(size)", node.id))
         }
         if !adapter.descriptor.supportedDurations.isEmpty && !adapter.descriptor.supportedDurations.contains(node.configuration.durationSeconds) {
             issues.append(error("生视频适配器不支持 \(node.configuration.durationSeconds) 秒时长", node.id))
+        }
+        if let capability = adapter.descriptor.videoCapability(for: node.configuration.model) {
+            let imageCount = workflow.connections.filter { $0.targetNodeID == node.id && $0.targetPortID == "referenceImage" }.count
+            let videoCount = workflow.connections.filter { $0.targetNodeID == node.id && $0.targetPortID == "referenceVideo" }.count
+            let audioCount = workflow.connections.filter { $0.targetNodeID == node.id && $0.targetPortID == "referenceAudio" }.count
+            if imageCount > capability.maximumReferenceImages ||
+                videoCount > capability.maximumReferenceVideos ||
+                audioCount > capability.maximumReferenceAudios {
+                issues.append(error("模型 \(capability.model) 不支持当前参考素材组合", node.id))
+            }
+            if node.configuration.includeAudio && !capability.supportsAudioGeneration {
+                issues.append(error("模型 \(capability.model) 不支持生成音频", node.id))
+            }
+            if !capability.aspectRatios.contains(node.configuration.mediaSize) {
+                issues.append(error("模型 \(capability.model) 不支持画幅 \(node.configuration.mediaSize)", node.id))
+            }
+            if !capability.resolutions.contains(size) {
+                issues.append(error("模型 \(capability.model) 不支持分辨率 \(size)", node.id))
+            }
+            if !capability.durations.contains(node.configuration.durationSeconds) {
+                issues.append(error("模型 \(capability.model) 不支持 \(node.configuration.durationSeconds) 秒时长", node.id))
+            }
         }
     }
 

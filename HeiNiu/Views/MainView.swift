@@ -49,6 +49,8 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
 
 /// 主窗口：工作台导航与详情。
 struct MainView: View {
+    @Environment(SettingsStore.self) private var settings
+    @Environment(PixmaxSessionManager.self) private var pixmaxSessions
     @State private var selection: SidebarItem? = .knowledge
 
     /// 导航标题。
@@ -73,6 +75,27 @@ struct MainView: View {
         }
         .background(AppTheme.bgBase)
         .navigationTitle(currentTitle)
+        .task {
+            pixmaxSessions.attach(settings: settings)
+        }
+        .onChange(of: settings.videoProviders) { _, _ in
+            pixmaxSessions.reconcile()
+        }
+        .sheet(item: Binding(
+            get: { pixmaxSessions.loginPresentation },
+            set: { value in
+                if value == nil, let current = pixmaxSessions.loginPresentation {
+                    pixmaxSessions.dismissLogin(providerID: current.providerID)
+                } else {
+                    pixmaxSessions.loginPresentation = value
+                }
+            }
+        )) { presentation in
+            PixmaxLoginView(
+                providerID: presentation.providerID,
+                automaticallyPresented: presentation.automaticallyPresented
+            )
+        }
     }
 
     // MARK: - Sidebar
@@ -167,5 +190,6 @@ struct MainView: View {
         .environment(SettingsStore())
         .environment(KnowledgeStore())
         .environment(WorkflowStore())
+        .environment(PixmaxSessionManager.shared)
         .frame(width: 1180, height: 760)
 }

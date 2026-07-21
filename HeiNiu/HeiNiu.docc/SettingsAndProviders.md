@@ -33,4 +33,6 @@
 - 文案模板在提示词库对应分类，不在接口页重复维护  
 - 服务商保存稳定 `adapterID` 与扩展配置；旧 `kind` 自动映射到内置适配器
 - ``MediaAdapterRegistry`` 只注册随应用编译的适配器，不加载外部二进制或 JSON 插件
-- 内置 OpenAI Images `/images/generations` 与 `/images/edits`，以及 OpenAI Videos `/videos`；未知适配器保留配置并明确显示不可执行原因
+- 内置 OpenAI Images `/images/generations` 与 `/images/edits`、OpenAI Videos `/videos`，以及 PixMax 原生画布适配器；未知适配器保留配置并明确显示不可执行原因
+- PixMax 使用个人版或企业子账号原生登录，不打开或嵌入浏览器；启用后每 60 秒检查登录态
+- PixMax 密码仅用于当次 RSA 加密请求，Cookie 验证通过后仅保存到钥匙串

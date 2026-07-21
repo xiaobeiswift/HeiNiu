@@ -118,7 +118,8 @@ final class WorkflowStore {
                 sourceNodeID: sourceID,
                 sourcePortID: connection.sourcePortID,
                 targetNodeID: targetID,
-                targetPortID: connection.targetPortID
+                targetPortID: connection.targetPortID,
+                targetOrder: connection.targetOrder
             )
         }
         let copy = WorkflowDefinition(
@@ -182,6 +183,7 @@ final class WorkflowStore {
             configuration.mediaSize = ImageProvider.defaultSize
         case .videoGeneration:
             configuration.mediaSize = "720x1280"
+            configuration.videoResolution = "720P"
             configuration.durationSeconds = 4
         case .loop:
             configuration.comparison = .contains
@@ -202,11 +204,18 @@ final class WorkflowStore {
         mutateWorkflow(id: workflowID) { workflow in
             guard let index = workflow.nodes.firstIndex(where: { $0.id == node.id }) else { return }
             let oldInputPortIDs = Set(workflow.nodes[index].descriptor.ports(for: workflow.nodes[index]).filter { $0.direction == .input }.map(\.id))
+            let oldOutputPortIDs = Set(workflow.nodes[index].descriptor.ports(for: workflow.nodes[index]).filter { $0.direction == .output }.map(\.id))
             workflow.nodes[index] = node
             let newInputPortIDs = Set(node.descriptor.ports(for: node).filter { $0.direction == .input }.map(\.id))
+            let newOutputPortIDs = Set(node.descriptor.ports(for: node).filter { $0.direction == .output }.map(\.id))
             if oldInputPortIDs != newInputPortIDs {
                 workflow.connections.removeAll {
                     $0.targetNodeID == node.id && !newInputPortIDs.contains($0.targetPortID)
+                }
+            }
+            if oldOutputPortIDs != newOutputPortIDs {
+                workflow.connections.removeAll {
+                    $0.sourceNodeID == node.id && !newOutputPortIDs.contains($0.sourcePortID)
                 }
             }
         }
@@ -244,18 +253,28 @@ final class WorkflowStore {
             return .failure(.invalidConnection("\(sourcePort.valueType.title)不能连接到\(targetPort.valueType.title)"))
         }
         guard !workflow.connections.contains(where: {
-            $0.targetNodeID == targetNodeID && $0.targetPortID == targetPortID
-        }) else { return .failure(.invalidConnection("每个输入端口只能连接一条线")) }
-        guard !workflow.connections.contains(where: {
             $0.sourceNodeID == sourceNodeID && $0.sourcePortID == sourcePortID &&
             $0.targetNodeID == targetNodeID && $0.targetPortID == targetPortID
         }) else { return .failure(.invalidConnection("这条连线已经存在")) }
+
+        let siblings = workflow.connections.filter {
+            $0.targetNodeID == targetNodeID && $0.targetPortID == targetPortID
+        }
+        guard siblings.count < targetPort.maxConnections else {
+            return .failure(.invalidConnection(
+                targetPort.maxConnections == 1
+                    ? "每个输入端口只能连接一条线"
+                    : "“\(targetPort.title)”最多连接 \(targetPort.maxConnections) 条线"
+            ))
+        }
+        let nextOrder = (siblings.map(\.targetOrder).max() ?? -1) + 1
 
         let connection = WorkflowConnection(
             sourceNodeID: sourceNodeID,
             sourcePortID: sourcePortID,
             targetNodeID: targetNodeID,
-            targetPortID: targetPortID
+            targetPortID: targetPortID,
+            targetOrder: nextOrder
         )
         workflow.connections.append(connection)
         workflow.updatedAt = Date()
@@ -355,7 +374,7 @@ final class WorkflowStore {
         switch value {
         case .text:
             return nil
-        case .image(let relative), .video(let relative):
+        case .image(let relative), .video(let relative), .audio(let relative):
             let url = runRoot(workflowID: run.workflowID, runID: run.id)
                 .appendingPathComponent(relative)
             return FileManager.default.fileExists(atPath: url.path) ? url : nil
@@ -419,17 +438,22 @@ final class WorkflowStore {
 }
 
 private struct WorkflowDefinitionsFile: Codable {
+    static let currentFormatVersion = 2
+
     var formatVersion: Int
     var workflows: [WorkflowDefinition]
 
     init(workflows: [WorkflowDefinition]) {
-        formatVersion = 1
+        formatVersion = Self.currentFormatVersion
         self.workflows = workflows
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        formatVersion = try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
+        formatVersion = max(
+            Self.currentFormatVersion,
+            try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
+        )
         workflows = try container.decodeIfPresent([WorkflowDefinition].self, forKey: .workflows) ?? []
     }
 }

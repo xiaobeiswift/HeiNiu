@@ -13,7 +13,7 @@
 | `KnowledgeBase/Files/<documentID>/...` | 导入原文件的本地副本 |
 | `Workflows/workflows.json` | 带格式版本的全局工作流定义 |
 | `Workflows/Runs/<workflowID>/<runID>/run.json` | 一次运行的状态、节点文本、警告与错误 |
-| `Workflows/Runs/<workflowID>/<runID>/Assets/` | 本次运行下载的图片与视频 |
+| `Workflows/Runs/<workflowID>/<runID>/Assets/` | 本次运行复制或下载的图片、视频与音频 |
 
 历史版本可能留下 `projects.json`、`Projects/`、智能体相关文件和 `Knowledge/` 目录；当前版本不再读取或写入这些数据，也不会主动删除。当前知识库使用名称不同的 `KnowledgeBase/` 目录。
 
@@ -24,7 +24,7 @@
 - 生图：`image-provider-<uuid>`
 - 生视频：`video-provider-<uuid>`
 
-API Key 永不写入普通配置 JSON。
+API Key 和验证后的 PixMax Cookie 永不写入普通配置 JSON。PixMax 密码不保存。
 
 ## 备份
 

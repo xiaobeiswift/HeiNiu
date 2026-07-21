@@ -45,7 +45,7 @@ struct VideoGenSettingsView: View {
                 StudioCard {
                     EmptyStateView(
                         title: "还没有生视频服务商",
-                        message: "添加 OpenAI 兼容或通用 HTTP 视频接口，用于镜头成片。",
+                        message: "添加 PixMax、OpenAI 兼容或通用 HTTP 视频接口，用于镜头成片。",
                         systemImage: "video.badge.waveform",
                         actionTitle: "添加生视频服务商",
                         action: addProvider
@@ -86,7 +86,7 @@ struct VideoGenSettingsView: View {
             }
             Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("API Key 将从钥匙串移除。")
+            Text("对应的 API Key 或 PixMax 登录凭据将从钥匙串移除。")
         }
         .onAppear {
             if expandedID == nil {
@@ -115,6 +115,7 @@ struct VideoGenSettingsView: View {
 /// `VideoProviderCard` 类型定义。
 private struct VideoProviderCard: View {
     @Environment(SettingsStore.self) private var settings
+    @Environment(PixmaxSessionManager.self) private var pixmaxSessions
 
     /// 按 ID 查找 LLM 服务商。
     let provider: VideoProvider
@@ -158,6 +159,12 @@ private struct VideoProviderCard: View {
         !settings.videoAPIKey(for: provider.id).isEmpty || !apiKey.isEmpty
     }
 
+    private var isPixmax: Bool { draft.kind == .pixmax || draft.adapterID == VideoProvider.pixmaxAdapterID }
+
+    private var pixmaxStatus: PixmaxSessionStatus {
+        pixmaxSessions.states[draft.id] ?? (draft.isEnabled ? .checking : .disabled)
+    }
+
     /// 当前源码适配器公开的能力说明。
     private var adapterDescriptor: MediaAdapterDescriptor? {
         MediaAdapterRegistry.shared.videoAdapter(id: draft.adapterID)?.descriptor
@@ -192,7 +199,7 @@ private struct VideoProviderCard: View {
         .onAppear {
             ready = false
             draft = provider
-            apiKey = settings.videoAPIKey(for: provider.id)
+            apiKey = isPixmax ? "" : settings.videoAPIKey(for: provider.id)
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(50))
                 ready = true
@@ -200,6 +207,23 @@ private struct VideoProviderCard: View {
         }
         .onChange(of: draft) { _, _ in schedulePersist() }
         .onChange(of: apiKey) { _, _ in schedulePersist() }
+        .onChange(of: provider) { _, updated in
+            guard updated != draft else { return }
+            ready = false
+            draft = updated
+            apiKey = isPixmax ? "" : settings.videoAPIKey(for: updated.id)
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(30))
+                ready = true
+            }
+        }
+        .task(id: pixmaxStatus) {
+            guard isPixmax,
+                  case .authenticated = pixmaxStatus,
+                  pixmaxSessions.accountOverviews[draft.id] == nil
+            else { return }
+            await pixmaxSessions.refreshAccountOverview(providerID: draft.id)
+        }
     }
 
     /// header。
@@ -218,11 +242,23 @@ private struct VideoProviderCard: View {
                     StatusBadge(text: "\(draft.models.count) 模型", style: .neutral)
                     StatusBadge(text: draft.defaultAspectRatio, style: .neutral)
                     StatusBadge(text: "\(draft.defaultDurationSeconds)s", style: .neutral)
-                    HStack(spacing: 5) {
-                        StatusDot(active: hasKey)
-                        Text(hasKey ? "Key 已配置" : "未配置 Key")
-                            .font(.caption)
-                            .foregroundStyle(AppTheme.textTertiary)
+                    if isPixmax {
+                        HStack(spacing: 5) {
+                            StatusDot(active: {
+                                if case .authenticated = pixmaxStatus { return true }
+                                return false
+                            }())
+                            Text(pixmaxStatus.title)
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.textTertiary)
+                        }
+                    } else {
+                        HStack(spacing: 5) {
+                            StatusDot(active: hasKey)
+                            Text(hasKey ? "Key 已配置" : "未配置 Key")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.textTertiary)
+                        }
                     }
                 }
             }
@@ -269,6 +305,15 @@ private struct VideoProviderCard: View {
                             if draft.baseURL.isEmpty { draft.baseURL = draft.kind.defaultBaseURL }
                             if draft.models.isEmpty { draft.models = draft.kind.defaultModels }
                         }
+                        if newValue == VideoProvider.pixmaxAdapterID {
+                            draft.kind = .pixmax
+                            draft.baseURL = PixmaxSite.international.baseURL
+                            draft.models = VideoProvider.pixmaxModels
+                            draft.defaultAspectRatio = "16:9"
+                            draft.defaultDurationSeconds = 5
+                            draft.adapterSettings["enabled"] = draft.adapterSettings["enabled"] ?? "false"
+                            draft.adapterSettings["submissionInterval"] = draft.adapterSettings["submissionInterval"] ?? "0"
+                        }
                         if !descriptor.supportedDurations.contains(draft.defaultDurationSeconds),
                            let first = descriptor.supportedDurations.first {
                             draft.defaultDurationSeconds = first
@@ -283,18 +328,38 @@ private struct VideoProviderCard: View {
 
             VStack(alignment: .leading, spacing: 12) {
                 SectionHeader("接入")
-                StudioTextField(
-                    title: "Base URL",
-                    text: $draft.baseURL,
-                    placeholder: draft.kind == .generic ? "https://your-gateway.example/v1" : draft.kind.defaultBaseURL,
-                    monospaced: true
-                )
-                KeyField(title: "API Key", text: $apiKey)
+                if isPixmax {
+                    pixmaxConnectionEditor
+                } else {
+                    StudioTextField(
+                        title: "Base URL",
+                        text: $draft.baseURL,
+                        placeholder: draft.kind == .generic ? "https://your-gateway.example/v1" : draft.kind.defaultBaseURL,
+                        monospaced: true
+                    )
+                    KeyField(title: "API Key", text: $apiKey)
+                }
             }
 
             VStack(alignment: .leading, spacing: 12) {
                 SectionHeader("模型")
-                ModelTagList(models: $draft.models)
+                if isPixmax {
+                    Text("PixMax 内置目录（只读）")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(AppTheme.textSecondary)
+                    FlowLayout(spacing: 7) {
+                        ForEach(draft.models, id: \.self) { model in
+                            Text(model)
+                                .font(.caption.monospaced())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(AppTheme.bgElevated, in: Capsule())
+                                .overlay(Capsule().stroke(AppTheme.stroke))
+                        }
+                    }
+                } else {
+                    ModelTagList(models: $draft.models)
+                }
             }
 
             VStack(alignment: .leading, spacing: 12) {
@@ -336,7 +401,7 @@ private struct VideoProviderCard: View {
                     .overlay(Capsule().stroke(AppTheme.strokeStrong, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .disabled(isTesting || adapterDescriptor == nil)
+                .disabled(isTesting || adapterDescriptor == nil || (isPixmax && !draft.isEnabled))
                 .help(adapterDescriptor == nil ? "当前源码适配器未注册，不能测试连接" : "使用当前配置测试媒体接口")
 
                 if let testMessage {
@@ -347,6 +412,231 @@ private struct VideoProviderCard: View {
                 }
                 Spacer()
             }
+        }
+    }
+
+    private var pixmaxConnectionEditor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle("启用 PixMax 与 60 秒登录心跳", isOn: Binding(
+                get: { draft.adapterSettings["enabled"] == "true" },
+                set: { enabled in
+                    draft.adapterSettings["enabled"] = enabled ? "true" : "false"
+                    persist()
+                    pixmaxSessions.setEnabled(enabled, providerID: draft.id)
+                }
+            ))
+
+            Picker("站点", selection: Binding(
+                get: { draft.effectiveBaseURL.contains("pixmax.cn") ? PixmaxSite.china : PixmaxSite.international },
+                set: { site in
+                    if draft.baseURL != site.baseURL {
+                        draft.baseURL = site.baseURL
+                        draft.adapterSettings["workspaceUUID"] = nil
+                        draft.adapterSettings["fileUUID"] = nil
+                    }
+                }
+            )) {
+                ForEach(PixmaxSite.allCases) { site in Text(site.title).tag(site) }
+            }
+
+            HStack(spacing: 8) {
+                Label(pixmaxStatus.title, systemImage: pixmaxStatusIcon)
+                    .font(.callout)
+                    .foregroundStyle(pixmaxStatusColor)
+                Spacer()
+                Button(hasKey ? "重新登录" : "登录") {
+                    persist()
+                    pixmaxSessions.requestLogin(providerID: draft.id)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(AppTheme.accent)
+                .foregroundStyle(.black)
+                Button("退出并停用", role: .destructive) {
+                    pixmaxSessions.logoutAndDisable(providerID: draft.id)
+                    draft = settings.videoProvider(id: draft.id) ?? draft
+                }
+                .buttonStyle(.bordered)
+                .disabled(!hasKey && !draft.isEnabled)
+            }
+
+            if case .authenticated = pixmaxStatus {
+                pixmaxAccountOverviewCard
+            }
+
+            Stepper(
+                "提交间隔 \(Int(draft.adapterSettings["submissionInterval"] ?? "0") ?? 0) 秒",
+                value: Binding(
+                    get: { min(20, max(0, Int(draft.adapterSettings["submissionInterval"] ?? "0") ?? 0)) },
+                    set: { draft.adapterSettings["submissionInterval"] = String(min(20, max(0, $0))) }
+                ),
+                in: 0...20
+            )
+            Text("上传、审核、画布写入和付费提交按该服务商串行执行。")
+                .font(.caption)
+                .foregroundStyle(AppTheme.textTertiary)
+
+            let workspace = draft.adapterSettings["workspaceUUID"] ?? ""
+            let file = draft.adapterSettings["fileUUID"] ?? ""
+            if !workspace.isEmpty, !file.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("画布已就绪")
+                        .font(.caption.weight(.semibold))
+                    Text("workspace \(workspace) · file \(file)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(AppTheme.textTertiary)
+                        .textSelection(.enabled)
+                }
+            } else {
+                Text("登录成功后会自动验证或创建 PERSONAL 项目与画布。")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+        }
+    }
+
+    private var pixmaxAccountOverviewCard: some View {
+        let overview = pixmaxSessions.accountOverviews[draft.id]
+        let isLoading = pixmaxSessions.overviewLoading.contains(draft.id)
+        let error = pixmaxSessions.overviewErrors[draft.id]
+        let isTeamAccount = draft.adapterSettings["loginMode"] == PixmaxLoginMode.team.rawValue
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label(
+                    isTeamAccount ? "团队子账号用量" : "账号用量",
+                    systemImage: "gauge.with.dots.needle.33percent"
+                )
+                .font(.subheadline.weight(.semibold))
+                Spacer()
+                if isLoading {
+                    ProgressView().controlSize(.small)
+                }
+                Button {
+                    Task { await pixmaxSessions.refreshAccountOverview(providerID: draft.id) }
+                } label: {
+                    Label("刷新", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .disabled(isLoading)
+            }
+
+            if let overview {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(isTeamAccount ? "子账号可用额度" : "可用积分")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.textTertiary)
+                        Text(overview.credit.displayValue(isTeamAccount: isTeamAccount))
+                            .font(.title2.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(AppTheme.accent)
+                    }
+                    Spacer()
+                    if isTeamAccount, !overview.credit.quotaMode.isEmpty {
+                        Text(pixmaxQuotaTitle(overview.credit.quotaMode))
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    } else if !overview.credit.userTier.isEmpty {
+                        Text(overview.credit.userTier)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(AppTheme.textTertiary)
+                    }
+                }
+
+                Divider().opacity(0.5)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("最近生成记录")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(AppTheme.textSecondary)
+                    if overview.recentGenerations.isEmpty {
+                        Text("该账号暂无生成记录")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    } else {
+                        ForEach(overview.recentGenerations) { record in
+                            pixmaxGenerationRow(record)
+                        }
+                    }
+                }
+            } else if isLoading {
+                Text("正在读取积分与生成记录…")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+
+            if let error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+        }
+        .padding(12)
+        .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(AppTheme.stroke, lineWidth: 1)
+        )
+    }
+
+    private func pixmaxGenerationRow(_ record: PixmaxGenerationRecord) -> some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.modelName.isEmpty ? "未知模型" : record.modelName)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Text("\(record.createTimeTitle) · \(record.taskUUID)")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(AppTheme.textTertiary)
+                    .lineLimit(1)
+                    .textSelection(.enabled)
+            }
+            Spacer(minLength: 8)
+            Text(record.statusTitle)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(pixmaxGenerationStatusColor(record.status))
+            Text("−\(record.creditCostTitle)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(AppTheme.textSecondary)
+                .frame(minWidth: 42, alignment: .trailing)
+        }
+    }
+
+    private func pixmaxQuotaTitle(_ quotaMode: String) -> String {
+        switch quotaMode.uppercased() {
+        case "UNLIMITED": "不限额"
+        case "DAILY": "每日额度"
+        case "WEEKLY": "每周额度"
+        case "MONTHLY": "每月额度"
+        case "FIXED": "固定额度"
+        default: quotaMode
+        }
+    }
+
+    private func pixmaxGenerationStatusColor(_ status: String) -> Color {
+        switch status.uppercased() {
+        case "COMPLETED", "COMPLETE", "SUCCESS": AppTheme.success
+        case "FAILED", "FAIL", "CANCELLED", "CANCELED", "ABORTED": AppTheme.danger
+        default: AppTheme.accent
+        }
+    }
+
+    private var pixmaxStatusIcon: String {
+        switch pixmaxStatus {
+        case .disabled: "pause.circle"
+        case .checking: "arrow.triangle.2.circlepath"
+        case .authenticated: "checkmark.shield.fill"
+        case .unauthorized: "person.crop.circle.badge.exclamationmark"
+        case .networkError: "wifi.exclamationmark"
+        }
+    }
+
+    private var pixmaxStatusColor: Color {
+        switch pixmaxStatus {
+        case .authenticated: AppTheme.success
+        case .unauthorized: AppTheme.danger
+        case .networkError: .orange
+        case .disabled, .checking: AppTheme.textSecondary
         }
     }
 
@@ -368,7 +658,8 @@ private struct VideoProviderCard: View {
         cleaned.baseURL = cleaned.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         draft = cleaned
         settings.updateVideoProvider(cleaned)
-        settings.setVideoAPIKey(apiKey, for: cleaned.id)
+        if !isPixmax { settings.setVideoAPIKey(apiKey, for: cleaned.id) }
+        pixmaxSessions.reconcile()
         onSaved()
     }
 
@@ -380,7 +671,19 @@ private struct VideoProviderCard: View {
         isTesting = true
         testMessage = nil
         testOK = nil
-        let result = await settings.testConnection(for: draft)
+        let result: SettingsStore.ConnectionTestResult
+        if isPixmax {
+            let status = await pixmaxSessions.checkNow(providerID: draft.id, automaticPrompt: false)
+            switch status {
+            case .authenticated(let summary): result = .success("登录有效：\(summary)")
+            case .networkError(let message): result = .failure(message)
+            case .unauthorized: result = .failure("登录已失效")
+            case .disabled: result = .failure("请先启用 PixMax")
+            case .checking: result = .failure("仍在检查")
+            }
+        } else {
+            result = await settings.testConnection(for: draft)
+        }
         isTesting = false
         switch result {
         case .success(let message):

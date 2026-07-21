@@ -1,6 +1,8 @@
 /// 节点工作流模块入口、模板列表、运行前检查与画布编排。
 
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 全局节点式工作流工作台。
 struct WorkflowHomeView: View {
@@ -379,14 +381,14 @@ private struct WorkflowRunPreflightSheet: View {
 
     let workflow: WorkflowDefinition
     let targetNodeID: UUID?
-    let onRun: ([String: String]) -> Void
+    let onRun: ([String: WorkflowValue]) -> Void
 
-    @State private var values: [String: String]
+    @State private var values: [String: WorkflowValue]
 
     init(
         workflow: WorkflowDefinition,
         targetNodeID: UUID?,
-        onRun: @escaping ([String: String]) -> Void
+        onRun: @escaping ([String: WorkflowValue]) -> Void
     ) {
         self.workflow = workflow
         self.targetNodeID = targetNodeID
@@ -395,7 +397,8 @@ private struct WorkflowRunPreflightSheet: View {
         let ids = targetNodeID == nil ? Set(workflow.nodes.map(\.id)) : relevant
         _values = State(initialValue: Dictionary(uniqueKeysWithValues: workflow.nodes.compactMap { node in
             guard ids.contains(node.id), node.kind == .runtimeInput else { return nil }
-            return (node.id.uuidString, node.configuration.text)
+            guard node.configuration.runtimeInputType == .text else { return nil }
+            return (node.id.uuidString, WorkflowValue.text(node.configuration.text))
         }))
     }
 
@@ -422,7 +425,7 @@ private struct WorkflowRunPreflightSheet: View {
     private var hasBlockingError: Bool {
         issues.contains { $0.severity == .error } || inputNodes.contains { node in
             node.configuration.isRequired &&
-            (values[node.id.uuidString] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            (values[node.id.uuidString]?.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         }
     }
 
@@ -461,15 +464,38 @@ private struct WorkflowRunPreflightSheet: View {
                                             Text("必填").font(.caption2).foregroundStyle(AppTheme.danger)
                                         }
                                     }
-                                    TextEditor(text: Binding(
-                                        get: { values[node.id.uuidString] ?? "" },
-                                        set: { values[node.id.uuidString] = $0 }
-                                    ))
-                                    .font(.callout)
-                                    .frame(minHeight: 74)
-                                    .padding(5)
-                                    .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 7))
-                                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(AppTheme.stroke))
+                                    if node.configuration.runtimeInputType == .text {
+                                        TextEditor(text: Binding(
+                                            get: {
+                                                guard case .text(let text) = values[node.id.uuidString] else { return "" }
+                                                return text
+                                            },
+                                            set: { values[node.id.uuidString] = .text($0) }
+                                        ))
+                                        .font(.callout)
+                                        .frame(minHeight: 74)
+                                        .padding(5)
+                                        .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 7))
+                                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(AppTheme.stroke))
+                                    } else {
+                                        HStack {
+                                            Image(systemName: mediaIcon(node.configuration.runtimeInputType))
+                                                .foregroundStyle(AppTheme.accent)
+                                            Text(selectedFilename(node.id))
+                                                .foregroundStyle(values[node.id.uuidString] == nil ? AppTheme.textTertiary : AppTheme.textPrimary)
+                                                .lineLimit(1)
+                                            Spacer()
+                                            Button(values[node.id.uuidString] == nil ? "选择文件" : "重新选择") {
+                                                chooseMedia(for: node)
+                                            }
+                                        }
+                                        .padding(10)
+                                        .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 7))
+                                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(AppTheme.stroke))
+                                        Text("文件会复制到本次运行的 Assets；运行记录不会保存原始绝对路径。")
+                                            .font(.caption)
+                                            .foregroundStyle(AppTheme.textTertiary)
+                                    }
                                 }
                             }
                         }
@@ -511,6 +537,44 @@ private struct WorkflowRunPreflightSheet: View {
         }
         .padding(10)
         .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func selectedFilename(_ nodeID: UUID) -> String {
+        guard let value = values[nodeID.uuidString] else { return "尚未选择文件" }
+        return URL(fileURLWithPath: value.payload).lastPathComponent
+    }
+
+    private func mediaIcon(_ type: WorkflowRuntimeInputType) -> String {
+        switch type {
+        case .text: "text.cursor"
+        case .image: "photo"
+        case .video: "video"
+        case .audio: "waveform"
+        }
+    }
+
+    private func chooseMedia(for node: WorkflowNode) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        switch node.configuration.runtimeInputType {
+        case .text:
+            return
+        case .image:
+            panel.allowedContentTypes = [.image]
+        case .video:
+            panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie]
+        case .audio:
+            panel.allowedContentTypes = [.audio]
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        switch node.configuration.runtimeInputType {
+        case .text: break
+        case .image: values[node.id.uuidString] = .image(url.path)
+        case .video: values[node.id.uuidString] = .video(url.path)
+        case .audio: values[node.id.uuidString] = .audio(url.path)
+        }
     }
 }
 

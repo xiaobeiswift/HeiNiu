@@ -42,6 +42,76 @@ final class WorkflowModelTests: XCTestCase {
     }
 
     @MainActor
+    func testVersionTwoAudioAndLegacyRuntimeInputsRoundTrip() throws {
+        let legacy = try JSONDecoder().decode(
+            WorkflowRun.self,
+            from: Data(#"{"formatVersion":1,"status":"succeeded","runtimeInputs":{"brief":"旧文本"},"nodeRuns":[]}"#.utf8)
+        )
+        XCTAssertEqual(legacy.formatVersion, 2)
+        XCTAssertEqual(legacy.runtimeInputs["brief"], .text("旧文本"))
+
+        let value = WorkflowValue.audio("Assets/voice.wav")
+        XCTAssertEqual(try JSONDecoder().decode(WorkflowValue.self, from: JSONEncoder().encode(value)), value)
+
+        let connection = WorkflowConnection(
+            sourceNodeID: UUID(),
+            sourcePortID: "audio",
+            targetNodeID: UUID(),
+            targetPortID: "referenceAudio",
+            targetOrder: 2
+        )
+        let decoded = try JSONDecoder().decode(WorkflowConnection.self, from: JSONEncoder().encode(connection))
+        XCTAssertEqual(decoded.targetOrder, 2)
+    }
+
+    @MainActor
+    func testPixmaxMultimediaPortsExposeOrderedConnectionLimits() throws {
+        let video = WorkflowNode(kind: .videoGeneration, position: .zero)
+        let ports = video.descriptor.ports(for: video)
+        XCTAssertEqual(ports.first { $0.id == "referenceImage" }?.maxConnections, 9)
+        XCTAssertEqual(ports.first { $0.id == "referenceVideo" }?.maxConnections, 3)
+        XCTAssertEqual(ports.first { $0.id == "referenceAudio" }?.maxConnections, 3)
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeiNiuConnectionLimits-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkflowStore(rootURL: root)
+        let workflowID = store.addWorkflow(named: "多参考")
+        let videoID = try XCTUnwrap(store.addNode(kind: .videoGeneration, to: workflowID, at: .zero))
+        var sourceIDs: [UUID] = []
+        for index in 0..<10 {
+            let id = try XCTUnwrap(store.addNode(
+                kind: .runtimeInput,
+                to: workflowID,
+                at: WorkflowPoint(x: Double(index), y: 0)
+            ))
+            var node = try XCTUnwrap(store.workflow(id: workflowID)?.nodes.first { $0.id == id })
+            node.configuration.runtimeInputType = .image
+            store.updateNode(node, in: workflowID)
+            sourceIDs.append(id)
+        }
+        for (index, sourceID) in sourceIDs.enumerated() {
+            let result = store.addConnection(
+                sourceNodeID: sourceID,
+                sourcePortID: "image",
+                targetNodeID: videoID,
+                targetPortID: "referenceImage",
+                in: workflowID
+            )
+            if index < 9 {
+                guard case .success = result else { return XCTFail("第 \(index + 1) 条参考图连接应成功") }
+            } else {
+                guard case .failure = result else { return XCTFail("第 10 条参考图连接应被拒绝") }
+            }
+        }
+        let orders = store.workflow(id: workflowID)?.connections
+            .filter { $0.targetNodeID == videoID && $0.targetPortID == "referenceImage" }
+            .map(\.targetOrder)
+        XCTAssertEqual(orders, Array(0..<9))
+        store.saveNow()
+    }
+
+    @MainActor
     func testLegacyProvidersMigrateToStableAdapterIDs() throws {
         let image = try JSONDecoder().decode(
             ImageProvider.self,
@@ -55,6 +125,14 @@ final class WorkflowModelTests: XCTestCase {
         )
         XCTAssertEqual(video.adapterID, VideoProvider.unconfiguredGenericAdapterID)
         XCTAssertNil(MediaAdapterRegistry.shared.videoAdapter(id: video.adapterID))
+
+        let legacyPixmax = VideoProvider(
+            name: "旧 PixMax",
+            kind: .pixmax,
+            baseURL: "https://app.pixmax.ai"
+        )
+        XCTAssertEqual(legacyPixmax.effectiveBaseURL, "https://console.pixmax.ai")
+        XCTAssertEqual(PixmaxSite.international.baseURL, "https://console.pixmax.ai")
     }
 
     @MainActor
@@ -206,6 +284,8 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
 
         let definitions = root.appendingPathComponent("workflows.json")
         XCTAssertTrue(FileManager.default.fileExists(atPath: definitions.path))
+        let definitionsObject = try JSONSerialization.jsonObject(with: Data(contentsOf: definitions)) as? [String: Any]
+        XCTAssertEqual(definitionsObject?["formatVersion"] as? Int, 2)
         let reloaded = WorkflowStore(rootURL: root)
         XCTAssertEqual(reloaded.workflow(id: workflowID)?.name, "持久化测试")
         let rootNames = try FileManager.default.contentsOfDirectory(atPath: root.path)
@@ -225,6 +305,8 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
         reloaded.saveRun(run)
         let runFile = reloaded.runRoot(workflowID: workflowID, runID: run.id).appendingPathComponent("run.json")
         XCTAssertTrue(FileManager.default.fileExists(atPath: runFile.path))
+        let runObject = try JSONSerialization.jsonObject(with: Data(contentsOf: runFile)) as? [String: Any]
+        XCTAssertEqual(runObject?["formatVersion"] as? Int, 2)
 
         reloaded.deleteRun(workflowID: workflowID, runID: run.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: runFile.path))
@@ -551,6 +633,382 @@ final class WorkflowMediaAdapterTests: XCTestCase {
         }
         return data
     }
+}
+
+final class PixmaxNativeTests: XCTestCase {
+    override func tearDown() {
+        MockURLProtocol.handler = nil
+        super.tearDown()
+    }
+
+    @MainActor
+    func testDomainAllowlistRSAAndLoginPaths() async throws {
+        XCTAssertNoThrow(try PixmaxAPIClient.validatedBaseURL("https://console.pixmax.ai"))
+        XCTAssertNoThrow(try PixmaxAPIClient.validatedBaseURL("https://team.console.pixmax.cn/ignored"))
+        XCTAssertThrowsError(try PixmaxAPIClient.validatedBaseURL("http://console.pixmax.ai"))
+        XCTAssertThrowsError(try PixmaxAPIClient.validatedBaseURL("https://pixmax.ai.evil.example"))
+
+        let encrypted = try PixmaxAuthenticator.encryptPassword("secret-password")
+        XCTAssertNotEqual(encrypted, "secret-password")
+        XCTAssertEqual(Data(base64Encoded: encrypted)?.count, 128)
+
+        var paths: [String] = []
+        var encryptedPasswords: [String] = []
+        MockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            paths.append(path)
+            if let body = try? JSONSerialization.jsonObject(with: requestPayload(request)) as? [String: Any],
+               let password = body["password"] as? String {
+                encryptedPasswords.append(password)
+                XCTAssertFalse(password.contains("secret-password"))
+            }
+            switch path {
+            case "/user/api/user/password/login", "/user/api/sub-user/login":
+                return (200, ["Content-Type": "application/json", "Set-Cookie": "pixmax_session=verified; Path=/; HttpOnly"], Data(#"{"success":true}"#.utf8))
+            case "/user/api/sub-user/mainUserInfo":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"enterpriseFlag":true}}"#.utf8))
+            case "/user/api/user/info":
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Cookie"), "pixmax_session=verified")
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"userUuid":"user-1","email":"tester@example.com"}}"#.utf8))
+            default:
+                return (404, [:], Data())
+            }
+        }
+
+        let authenticator = PixmaxAuthenticator(session: mockPixmaxSession())
+        let personal = try await authenticator.personalLogin(
+            site: .international,
+            account: "tester@example.com",
+            password: "secret-password"
+        )
+        XCTAssertEqual(personal.cookie, "pixmax_session=verified")
+        XCTAssertEqual(personal.identity.stableID, "user-1")
+
+        let teamUUID = "12345678-1234-1234-1234-123456789abc"
+        _ = try await authenticator.teamLogin(
+            baseURL: PixmaxSite.international.baseURL,
+            teamLinkOrUUID: "https://console.pixmax.ai/team/\(teamUUID)",
+            account: "sub-account",
+            password: "secret-password"
+        )
+        XCTAssertTrue(paths.contains("/user/api/sub-user/mainUserInfo"))
+        XCTAssertTrue(paths.contains("/user/api/sub-user/login"))
+        XCTAssertEqual(encryptedPasswords.count, 2)
+    }
+
+    @MainActor
+    func testTeamLoginExplainsUnknownMainUser() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/user/api/sub-user/mainUserInfo")
+            return (
+                200,
+                ["Content-Type": "application/json"],
+                Data(#"{"success":false,"errCode":"User.NotFound","errMessage":"User not found"}"#.utf8)
+            )
+        }
+
+        do {
+            _ = try await PixmaxAuthenticator(session: mockPixmaxSession()).teamLogin(
+                baseURL: PixmaxSite.china.baseURL,
+                teamLinkOrUUID: "12345678-1234-1234-1234-123456789abc",
+                account: "sub-account",
+                password: "secret-password"
+            )
+            XCTFail("无效 mainUserUuid 应被拒绝")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("团队链接或 mainUserUuid 不正确"))
+        }
+    }
+
+    @MainActor
+    func testTeamIdentityPrefersSubUserAndMasksAccount() throws {
+        let response: [String: Any] = [
+            "data": [
+                "userUuid": "main-user",
+                "phone": "15000008888",
+                "subUser": [
+                    "subUserUuid": "sub-user",
+                    "subUserAccount": "18000006666",
+                ],
+            ],
+        ]
+        let identity = try PixmaxAPIClient.identity(from: response)
+        XCTAssertEqual(identity.stableID, "sub-user")
+        XCTAssertEqual(identity.summary, "180****6666")
+    }
+
+    @MainActor
+    func testTeamOverviewUsesSubAccountQuotaAndRecentConsumptions() async throws {
+        MockURLProtocol.handler = { request in
+            switch request.url?.path {
+            case "/user/api/credit/balance":
+                XCTAssertEqual(request.httpMethod, "GET")
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"totalBalance":99999,"availableQuota":4321.5,"quotaMode":"FIXED","userTier":"TEAM"}}"#.utf8))
+            case "/user/api/credit/consumptions":
+                XCTAssertEqual(request.httpMethod, "POST")
+                let payload = try? JSONSerialization.jsonObject(with: requestPayload(request)) as? [String: Any]
+                XCTAssertEqual(payload?["pageIndex"] as? Int, 1)
+                XCTAssertEqual(payload?["pageSize"] as? Int, 8)
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":[{"taskUuid":"task-1","modelName":"Seedance 2.0","createTime":"1784678400000","status":"COMPLETED","totalCost":88}]}"#.utf8))
+            default:
+                return (404, [:], Data())
+            }
+        }
+
+        let client = try PixmaxAPIClient(
+            baseURL: PixmaxSite.china.baseURL,
+            cookie: "session=team",
+            session: mockPixmaxSession()
+        )
+        let overview = try await client.accountOverview()
+        XCTAssertEqual(overview.credit.displayValue(isTeamAccount: true), "4,321.5")
+        XCTAssertEqual(overview.credit.displayValue(isTeamAccount: false), "99,999")
+        XCTAssertEqual(overview.recentGenerations.first?.taskUUID, "task-1")
+        XCTAssertEqual(overview.recentGenerations.first?.statusTitle, "已完成")
+        XCTAssertEqual(overview.recentGenerations.first?.creditCostTitle, "88")
+    }
+
+    @MainActor
+    func testCookieImportRequiresUserInfoAndInvalidationPromptsOnce() async throws {
+        MockURLProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/user/api/user/info")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Cookie"), "session=manual")
+            return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"uuid":"cookie-user","nickname":"Cookie User"}}"#.utf8))
+        }
+        let result = try await PixmaxAuthenticator(session: mockPixmaxSession()).importCookie(
+            baseURL: PixmaxSite.international.baseURL,
+            cookie: "session=manual"
+        )
+        XCTAssertEqual(result.identity.summary, "Cookie User")
+
+        let manager = PixmaxSessionManager(session: mockPixmaxSession(), heartbeatInterval: .milliseconds(5))
+        let providerID = UUID()
+        manager.reportAuthenticationFailure(providerID: providerID)
+        XCTAssertEqual(manager.loginPresentation?.providerID, providerID)
+        manager.dismissLogin(providerID: providerID)
+        manager.reportAuthenticationFailure(providerID: providerID)
+        XCTAssertNil(manager.loginPresentation, "同一失效周期不应重复自动弹框")
+        manager.requestLogin(providerID: providerID)
+        XCTAssertEqual(manager.loginPresentation?.providerID, providerID, "手动登录仍可重新打开")
+        manager.dismissLogin(providerID: providerID)
+    }
+
+    @MainActor
+    func testPixmaxAdapterReusesRemoteAssetBuildsMentionAndDownloads() async throws {
+        let output = try pixmaxTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        let audio = output.appendingPathComponent("voice.mp3")
+        try Data("fake-audio".utf8).write(to: audio)
+        let videoBytes = Data("pixmax-video".utf8)
+        var capturedPrompt = ""
+        var authorizeCalls = 0
+        var revision = 1
+
+        MockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            switch path {
+            case "/user/api/user/info":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"uuid":"u1","email":"u@example.com"}}"#.utf8))
+            case "/user/api/canvas/get":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"revision":"r0"}}"#.utf8))
+            case "/user/api/assets/check":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"assetsUuid":"asset-audio","webUrl":"/voice.mp3","ossDomain":"https://cdn.invalid","complianceStatus":"ACTIVE"}}"#.utf8))
+            case "/user/api/assets/oss/authorize":
+                authorizeCalls += 1
+                return (500, [:], Data())
+            case "/user/api/assetLibrary/compliance/check":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"assetsUuid":"asset-audio","complianceStatus":"ACTIVE","webUrl":"/voice.mp3","ossDomain":"https://cdn.invalid"}}"#.utf8))
+            case "/user/api/canvas/node/batch":
+                if let payload = try? JSONSerialization.jsonObject(with: requestPayload(request)) as? [String: Any],
+                   let creates = payload["create"] as? [[String: Any]],
+                   let generation = creates.first,
+                   generation["type"] as? String == "GENERATE_VIDEO",
+                   let params = generation["params"] as? [String: Any] {
+                    capturedPrompt = params["prompt"] as? String ?? ""
+                    XCTAssertEqual(params["count"] as? String, "1")
+                    XCTAssertEqual(params["referModel"] as? String, "referToVideo")
+                }
+                revision += 1
+                return (200, ["Content-Type": "application/json"], Data("{\"success\":true,\"data\":{\"revision\":\"r\(revision)\"}}".utf8))
+            case "/user/api/generate/batch":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true}"#.utf8))
+            case "/user/api/generate/progress":
+                let body = try? JSONSerialization.jsonObject(with: requestPayload(request)) as? [String: Any]
+                let uuid = (body?["nodeUuids"] as? [String])?.first ?? ""
+                return (200, ["Content-Type": "application/json"], Data("{\"success\":true,\"data\":[{\"nodeUuid\":\"\(uuid)\",\"status\":\"COMPLETE\",\"resultAssets\":[{\"assetsUuid\":\"result-1\",\"webUrl\":\"https://cdn.invalid/result.mp4\"}]}]}".utf8))
+            case "/result.mp4":
+                return (200, ["Content-Type": "video/mp4"], videoBytes)
+            default:
+                return (404, [:], Data())
+            }
+        }
+
+        let provider = pixmaxProvider()
+        let artifact = try await PixmaxVideoGenerationAdapter(session: mockPixmaxSession()).generate(
+            request: VideoGenerationRequest(
+                prompt: "让音频1驱动画面",
+                model: "PIXDANCE_2_FAST",
+                aspectRatio: "16:9",
+                resolution: "720P",
+                durationSeconds: 5,
+                includeAudio: true,
+                referenceAudioURLs: [audio]
+            ),
+            provider: provider,
+            apiKey: "session=valid",
+            outputDirectory: output,
+            progress: { _ in }
+        )
+        XCTAssertEqual(try Data(contentsOf: artifact.fileURL), videoBytes)
+        XCTAssertEqual(authorizeCalls, 0, "远端哈希命中后不应再次申请 OSS 上传")
+        XCTAssertTrue(capturedPrompt.contains("%%@[voice.mp3][audio][0]("))
+        XCTAssertFalse(capturedPrompt.contains("音频1"))
+    }
+
+    @MainActor
+    func testPixmaxAdapterUsesNativeOSSSignatureWithoutBrowserFallback() async throws {
+        let output = try pixmaxTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        let audio = output.appendingPathComponent("upload.mp3")
+        try Data("upload-audio".utf8).write(to: audio)
+        let videoBytes = Data("uploaded-result".utf8)
+        var sawSignedPut = false
+        var revision = 0
+
+        MockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "HEAD" {
+                return (200, ["Date": "Wed, 22 Jul 2026 00:00:00 GMT"], Data())
+            }
+            if request.httpMethod == "PUT" {
+                sawSignedPut = request.value(forHTTPHeaderField: "Authorization")?.hasPrefix("OSS AKID:") == true &&
+                    request.value(forHTTPHeaderField: "x-oss-security-token") == "TOKEN" &&
+                    request.value(forHTTPHeaderField: "x-oss-callback") != nil
+                return (200, [:], Data())
+            }
+            switch path {
+            case "/user/api/user/info":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"uuid":"u1","email":"u@example.com"}}"#.utf8))
+            case "/user/api/canvas/get":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"revision":"r0"}}"#.utf8))
+            case "/user/api/assets/check":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":false,"errCode":"Common.NotFound"}"#.utf8))
+            case "/user/api/assets/oss/authorize":
+                let json = #"{"success":true,"data":{"sessionId":"oss-session","objectKey":"folder/upload.mp3","bucketName":"bucket","endpoint":"oss.invalid","contentType":"audio/mpeg","accessKeyId":"AKID","accessKeySecret":"SECRET","securityToken":"TOKEN","callbackUrl":"https://callback.invalid","callbackBody":"asset=${object}","callbackBodyType":"application/x-www-form-urlencoded"}}"#
+                return (200, ["Content-Type": "application/json"], Data(json.utf8))
+            case "/user/api/assets/oss/check":
+                let json = #"{"success":true,"data":{"status":"COMPLETED","asset":{"assetsUuid":"uploaded-audio","webUrl":"/upload.mp3","ossDomain":"https://cdn.invalid","complianceStatus":"ACTIVE"}}}"#
+                return (200, ["Content-Type": "application/json"], Data(json.utf8))
+            case "/user/api/assetLibrary/compliance/check":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true,"data":{"assetsUuid":"uploaded-audio","complianceStatus":"ACTIVE","webUrl":"/upload.mp3","ossDomain":"https://cdn.invalid"}}"#.utf8))
+            case "/user/api/canvas/node/batch":
+                revision += 1
+                return (200, ["Content-Type": "application/json"], Data("{\"success\":true,\"data\":{\"revision\":\"r\(revision)\"}}".utf8))
+            case "/user/api/generate/batch":
+                return (200, ["Content-Type": "application/json"], Data(#"{"success":true}"#.utf8))
+            case "/user/api/generate/progress":
+                let body = try? JSONSerialization.jsonObject(with: requestPayload(request)) as? [String: Any]
+                let uuid = (body?["nodeUuids"] as? [String])?.first ?? ""
+                return (200, ["Content-Type": "application/json"], Data("{\"success\":true,\"data\":[{\"nodeUuid\":\"\(uuid)\",\"status\":\"COMPLETE\",\"resultAssets\":[{\"assetsUuid\":\"result-1\",\"webUrl\":\"https://cdn.invalid/uploaded.mp4\"}]}]}".utf8))
+            case "/uploaded.mp4":
+                return (200, ["Content-Type": "video/mp4"], videoBytes)
+            default:
+                return (404, [:], Data())
+            }
+        }
+
+        let artifact = try await PixmaxVideoGenerationAdapter(session: mockPixmaxSession()).generate(
+            request: VideoGenerationRequest(
+                prompt: "使用音频1",
+                model: "PIXDANCE_2_FAST",
+                aspectRatio: "16:9",
+                resolution: "720P",
+                durationSeconds: 5,
+                includeAudio: false,
+                referenceAudioURLs: [audio]
+            ),
+            provider: pixmaxProvider(),
+            apiKey: "session=valid",
+            outputDirectory: output,
+            progress: { _ in }
+        )
+        XCTAssertTrue(sawSignedPut)
+        XCTAssertEqual(try Data(contentsOf: artifact.fileURL), videoBytes)
+    }
+
+    @MainActor
+    func testPixmaxRejectsUnsupportedMediaCombinationBeforeNetwork() async throws {
+        let output = try pixmaxTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: output) }
+        let audio = output.appendingPathComponent("voice.wav")
+        try Data("audio".utf8).write(to: audio)
+        MockURLProtocol.handler = { _ in
+            XCTFail("不支持的组合不应发起网络请求")
+            return (500, [:], Data())
+        }
+        do {
+            _ = try await PixmaxVideoGenerationAdapter(session: mockPixmaxSession()).generate(
+                request: VideoGenerationRequest(
+                    prompt: "测试",
+                    model: "SEEDANCE_1_5",
+                    aspectRatio: "16:9",
+                    resolution: "720P",
+                    durationSeconds: 5,
+                    includeAudio: false,
+                    referenceAudioURLs: [audio]
+                ),
+                provider: pixmaxProvider(),
+                apiKey: "session=valid",
+                outputDirectory: output,
+                progress: { _ in }
+            )
+            XCTFail("应拒绝不支持的音频参考")
+        } catch let error as PixmaxError {
+            XCTAssertTrue(error.localizedDescription.contains("不支持当前视频或音频参考组合"))
+        }
+    }
+
+    @MainActor
+    private func pixmaxProvider() -> VideoProvider {
+        VideoProvider(
+            name: "PixMax Mock",
+            kind: .pixmax,
+            adapterSettings: [
+                "enabled": "true",
+                "workspaceUUID": "workspace-1",
+                "fileUUID": "file-1",
+                "submissionInterval": "0",
+            ]
+        )
+    }
+
+    private func pixmaxTemporaryDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeiNiuPixmaxTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+}
+
+private func mockPixmaxSession() -> URLSession {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [MockURLProtocol.self]
+    return URLSession(configuration: configuration)
+}
+
+private func requestPayload(_ request: URLRequest) -> Data {
+    if let body = request.httpBody { return body }
+    guard let stream = request.httpBodyStream else { return Data() }
+    stream.open()
+    defer { stream.close() }
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 4_096)
+    while stream.hasBytesAvailable {
+        let count = stream.read(&buffer, maxLength: buffer.count)
+        guard count > 0 else { break }
+        data.append(buffer, count: count)
+    }
+    return data
 }
 
 private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
