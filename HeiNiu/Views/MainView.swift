@@ -7,8 +7,6 @@ import SwiftUI
 
 /// 侧栏一级模块。
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
-    /// 项目。
-    case projects
     /// 剧本。
     case scripts
     /// 分镜。
@@ -26,7 +24,6 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     /// 标题。
     var title: String {
         switch self {
-        case .projects: "项目"
         case .scripts: "剧本"
         case .storyboards: "分镜"
         case .assets: "资产库"
@@ -38,7 +35,6 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     /// 用于 UI 的 SF Symbol。
     var systemImage: String {
         switch self {
-        case .projects: "folder"
         case .scripts: "doc.text"
         case .storyboards: "rectangle.split.3x1"
         case .assets: "square.grid.2x2"
@@ -48,12 +44,12 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     }
 
     /// 工作台模块。
-    static let workspaceItems: [SidebarItem] = [.projects, .scripts, .storyboards, .assets, .knowledge]
+    static let workspaceItems: [SidebarItem] = [.knowledge, .scripts, .storyboards, .assets]
 }
 
 /// 主窗口：工作台导航与详情。
 struct MainView: View {
-    @State private var selection: SidebarItem? = .projects
+    @State private var selection: SidebarItem? = .knowledge
 
     /// 导航标题。
     private var currentTitle: String {
@@ -140,8 +136,6 @@ struct MainView: View {
     @ViewBuilder
     private var detailView: some View {
         switch selection {
-        case .projects:
-            ProjectsHomeView()
         case .scripts:
             PlaceholderView(
                 title: "剧本",
@@ -168,7 +162,7 @@ struct MainView: View {
         case .settings:
             SettingsView()
         case .none:
-            ProjectsHomeView()
+            KnowledgeHomeView()
         }
     }
 }
@@ -176,7 +170,6 @@ struct MainView: View {
 #Preview {
     MainView()
         .environment(SettingsStore())
-        .environment(ProjectStore())
         .environment(KnowledgeStore())
         .frame(width: 1180, height: 760)
 }

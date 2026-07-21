@@ -124,38 +124,6 @@ nonisolated struct KnowledgeChunk: Identifiable, Hashable, Sendable {
     var embeddingFingerprint: String
 }
 
-/// 一次流水线生成实际命中的知识片段。
-nonisolated struct KnowledgeCitation: Identifiable, Codable, Hashable, Sendable {
-    var id: UUID
-    var documentID: UUID
-    var documentTitle: String
-    var chunkText: String
-    var similarity: Double
-
-    init(
-        id: UUID = UUID(),
-        documentID: UUID,
-        documentTitle: String,
-        chunkText: String,
-        similarity: Double
-    ) {
-        self.id = id
-        self.documentID = documentID
-        self.documentTitle = documentTitle
-        self.chunkText = chunkText
-        self.similarity = similarity
-    }
-}
-
-/// 知识检索返回值。
-nonisolated struct KnowledgeRetrievalResult: Sendable {
-    var context: String
-    var citations: [KnowledgeCitation]
-    var warning: String?
-
-    static let empty = KnowledgeRetrievalResult(context: "", citations: [], warning: nil)
-}
-
 /// 知识库导入汇总。
 nonisolated struct KnowledgeImportSummary: Sendable {
     var createdIDs: [UUID] = []

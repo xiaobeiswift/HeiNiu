@@ -12,7 +12,6 @@ private enum KnowledgeCollectionFilter: Hashable {
 
 struct KnowledgeHomeView: View {
     @Environment(KnowledgeStore.self) private var store
-    @Environment(ProjectStore.self) private var projects
     @Environment(SettingsStore.self) private var settings
 
     @State private var filter: KnowledgeCollectionFilter = .all
@@ -95,7 +94,7 @@ struct KnowledgeHomeView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("知识库")
                     .font(.largeTitle.weight(.bold))
-                Text("全局资料 · 向量检索 · 项目按需引用")
+                Text("全局资料 · 本地向量索引 · 独立归档")
                     .font(.callout)
                     .foregroundStyle(AppTheme.textSecondary)
             }
@@ -161,7 +160,6 @@ struct KnowledgeHomeView: View {
                             Button("重命名") { renamingCollection = collection }
                             Divider()
                             Button("删除集合", role: .destructive) {
-                                projects.removeKnowledgeReferences(collectionID: collection.id)
                                 store.deleteCollection(id: collection.id)
                                 filter = .all
                             }
@@ -267,7 +265,6 @@ struct KnowledgeHomeView: View {
     private var detail: some View {
         if let document = store.document(id: selectedDocumentID) {
             KnowledgeDocumentDetail(document: document) {
-                projects.removeKnowledgeReferences(documentID: document.id)
                 store.deleteDocument(id: document.id)
                 selectedDocumentID = nil
             }
@@ -331,10 +328,6 @@ struct KnowledgeHomeView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try store.importArchive(from: url, mode: mode, settings: settings)
-            projects.pruneKnowledgeReferences(
-                validCollectionIDs: Set(store.collections.map(\.id)),
-                validDocumentIDs: Set(store.documents.map(\.id))
-            )
             selectedDocumentID = nil
             filter = .all
             statusMessage = mode == .merge ? "知识库已合并导入" : "知识库已替换"

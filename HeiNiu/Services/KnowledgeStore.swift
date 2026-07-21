@@ -287,71 +287,6 @@ final class KnowledgeStore {
         return vectors.first?.count ?? 0
     }
 
-    // MARK: - Retrieval
-
-    func retrieve(query: String, project: ProjectItem, settings: SettingsStore) async throws -> KnowledgeRetrievalResult {
-        let selectedCollections = Set(project.knowledgeCollectionIDs)
-        let selectedDocuments = Set(project.knowledgeDocumentIDs)
-        guard !selectedCollections.isEmpty || !selectedDocuments.isEmpty else { return .empty }
-
-        let eligible = documents.filter {
-            selectedDocuments.contains($0.id)
-                || ($0.collectionID.map(selectedCollections.contains) ?? false)
-        }
-        guard !eligible.isEmpty else { return .empty }
-        let target = try embeddingTarget(settings: settings)
-        let ready = eligible.filter {
-            $0.indexStatus == .ready && $0.embeddingFingerprint == target.fingerprint
-        }
-        guard !ready.isEmpty else {
-            throw LLMError.underlying("项目已选择知识资料，但没有适用于当前嵌入模型的可用索引。请先到知识库完成索引。")
-        }
-
-        let queryVector = try await OpenAIEmbeddingClient.embed(
-            inputs: [String(query.prefix(12_000))],
-            provider: target.provider,
-            model: target.model,
-            apiKey: target.apiKey,
-            apiMode: target.apiMode
-        ).first ?? []
-        let chunks = try database?.loadChunks(
-            documentIDs: Set(ready.map(\.id)),
-            fingerprint: target.fingerprint
-        ) ?? []
-        let titleByID = Dictionary(uniqueKeysWithValues: ready.map { ($0.id, $0.title) })
-        let ranked = chunks.compactMap { chunk -> (KnowledgeChunk, Double)? in
-            guard chunk.vector.count == queryVector.count, !queryVector.isEmpty else { return nil }
-            return (chunk, Self.cosine(queryVector, chunk.vector))
-        }.sorted { $0.1 > $1.1 }
-
-        var selected: [(KnowledgeChunk, Double)] = []
-        var perDocument: [UUID: Int] = [:]
-        var characters = 0
-        for candidate in ranked {
-            guard selected.count < 6 else { break }
-            guard (perDocument[candidate.0.documentID] ?? 0) < 2 else { continue }
-            guard characters + candidate.0.text.count <= 8_000 || selected.isEmpty else { continue }
-            selected.append(candidate)
-            perDocument[candidate.0.documentID, default: 0] += 1
-            characters += candidate.0.text.count
-        }
-        let citations = selected.map { chunk, score in
-            KnowledgeCitation(
-                documentID: chunk.documentID,
-                documentTitle: titleByID[chunk.documentID] ?? "未知资料",
-                chunkText: String(chunk.text.prefix(700)),
-                similarity: score
-            )
-        }
-        let context = selected.enumerated().map { index, item in
-            let title = titleByID[item.0.documentID] ?? "未知资料"
-            return "【知识 \(index + 1)｜\(title)】\n\(item.0.text)"
-        }.joined(separator: "\n\n")
-        let pendingCount = eligible.count - ready.count
-        let warning = pendingCount > 0 ? "另有 \(pendingCount) 份已选资料尚未完成当前模型的索引。" : nil
-        return KnowledgeRetrievalResult(context: context, citations: citations, warning: warning)
-    }
-
     // MARK: - Archive
 
     func exportArchive(to destination: URL, settings: SettingsStore) throws {
@@ -539,21 +474,6 @@ final class KnowledgeStore {
         }
         appendCurrent()
         return chunks
-    }
-
-    nonisolated private static func cosine(_ lhs: [Float], _ rhs: [Float]) -> Double {
-        var dot = 0.0
-        var left = 0.0
-        var right = 0.0
-        for index in lhs.indices {
-            let a = Double(lhs[index])
-            let b = Double(rhs[index])
-            dot += a * b
-            left += a * a
-            right += b * b
-        }
-        guard left > 0, right > 0 else { return 0 }
-        return dot / (sqrt(left) * sqrt(right))
     }
 
     nonisolated private static func runDitto(arguments: [String]) throws {

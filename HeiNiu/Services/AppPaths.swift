@@ -24,16 +24,6 @@ enum AppPaths {
         applicationSupportRoot.appendingPathComponent("settings.json", isDirectory: false)
     }
 
-    /// 短剧项目列表（立项看板，v1 不含集数实体）。
-    static var projectsFileURL: URL {
-        applicationSupportRoot.appendingPathComponent("projects.json", isDirectory: false)
-    }
-
-    /// 各项目工作区根目录（流水线产物、素材等）。
-    static var projectsRoot: URL {
-        applicationSupportRoot.appendingPathComponent("Projects", isDirectory: true)
-    }
-
     /// 知识库根目录。
     static var knowledgeBaseRoot: URL {
         applicationSupportRoot.appendingPathComponent("KnowledgeBase", isDirectory: true)
@@ -49,32 +39,14 @@ enum AppPaths {
         knowledgeBaseRoot.appendingPathComponent("Files", isDirectory: true)
     }
 
-    /// 指定项目的工作目录。
-    static func projectDirectory(for projectID: UUID) -> URL {
-        projectsRoot.appendingPathComponent(projectID.uuidString, isDirectory: true)
-    }
-
-    /// 项目流水线状态文件。
-    static func projectPipelineFileURL(for projectID: UUID) -> URL {
-        projectDirectory(for: projectID).appendingPathComponent("pipeline.json", isDirectory: false)
-    }
-
-    /// 确保 Application Support 根目录与项目根目录存在。
+    /// 确保 Application Support 根目录与知识库目录存在。
     static func ensureDirectories() {
         let fm = FileManager.default
-        for url in [applicationSupportRoot, projectsRoot, knowledgeBaseRoot, knowledgeFilesRoot] {
+        for url in [applicationSupportRoot, knowledgeBaseRoot, knowledgeFilesRoot] {
             if !fm.fileExists(atPath: url.path) {
                 try? fm.createDirectory(at: url, withIntermediateDirectories: true)
             }
         }
-    }
-
-    /// 确保某项目工作目录存在。
-    @discardableResult
-    static func ensureProjectDirectory(for projectID: UUID) -> URL {
-        let dir = projectDirectory(for: projectID)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
     }
 
 }
