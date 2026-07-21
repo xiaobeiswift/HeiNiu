@@ -12,6 +12,8 @@
 - OpenAI 兼容模式：``OpenAICompatibleAPIMode``（Chat Completions / Responses）  
 - ``ProvidersSettingsView``：默认折叠；右侧菜单「编辑 / 删除」  
 - 「获取模型列表」：`SettingsStore.fetchModels(for:)`  
+- “默认大模型”保存全局 LLM 服务商与模型；内置提示词以及未单独绑定的 LLM、图片知识入库节点自动继承，显式节点配置优先
+- 图片知识入库仍要求默认服务商开启视觉能力；API Key 继续只保存在钥匙串
 
 ## 知识库嵌入
 
@@ -27,6 +29,7 @@
 - 条目：``PromptItem``（每类多条）  
 - 默认模板：``DefaultPrompts``  
 - “知识库添加”分类预置“产品图片知识整理”和“汽车图片知识整理”两套模板，前者是内置“添加知识库”工作流的默认选择；两者均可使用 `{{filename}}` 与 `{{requirements}}` 变量
+- 应用内置条目显示“内置”标识，名称、分类、模型绑定和正文均只读，不能删除；复制出的副本会取消内置属性并允许自由编辑
 
 ## 生图 / 生视频
 

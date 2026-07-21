@@ -12,6 +12,8 @@ struct WorkflowInspectorView: View {
 
     let workflow: WorkflowDefinition
     let node: WorkflowNode?
+    /// 是否禁止修改工作流配置。
+    let isReadOnly: Bool
     @Binding var tab: WorkflowInspectorTab
     @Binding var selectedHistoryRunID: UUID?
     let onUpdateNode: (WorkflowNode) -> Void
@@ -47,8 +49,23 @@ struct WorkflowInspectorView: View {
             switch tab {
             case .configuration:
                 if let node {
-                    WorkflowNodeConfigurationView(node: node, onUpdate: onUpdateNode)
-                        .id(node.id)
+                    VStack(spacing: 0) {
+                        if isReadOnly {
+                            HStack(spacing: 7) {
+                                Image(systemName: "lock.fill")
+                                Text("内置工作流只读，请先复制再编辑")
+                            }
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(AppTheme.accent)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(AppTheme.accentSoft)
+                        }
+                        WorkflowNodeConfigurationView(node: node, onUpdate: onUpdateNode)
+                            .id(node.id)
+                            .disabled(isReadOnly)
+                    }
                 } else {
                     inspectorEmpty("选择一个节点", "可配置节点参数和模型服务。", "slider.horizontal.3")
                 }
@@ -262,7 +279,7 @@ private struct WorkflowNodeConfigurationView: View {
             }
             inspectorSection("视觉模型") {
                 llmProviderPicker
-                modelPicker(models: selectedLLMProvider?.models ?? [])
+                llmModelPicker
                 VStack(alignment: .leading, spacing: 6) {
                     Text("温度 \(draft.configuration.temperature, specifier: "%.1f")").font(.caption)
                     Slider(value: $draft.configuration.temperature, in: 0...2, step: 0.1)
@@ -295,7 +312,7 @@ private struct WorkflowNodeConfigurationView: View {
         case .llm:
             inspectorSection("模型") {
                 llmProviderPicker
-                modelPicker(models: selectedLLMProvider?.models ?? [])
+                llmModelPicker
                 labeledEditor("系统提示（可选）", text: $draft.configuration.systemPrompt, minHeight: 90)
                 VStack(alignment: .leading, spacing: 6) {
                     Text("温度 \(draft.configuration.temperature, specifier: "%.1f")").font(.caption)
@@ -407,7 +424,9 @@ private struct WorkflowNodeConfigurationView: View {
         }
     }
 
-    private var selectedLLMProvider: LLMProvider? { settings.provider(id: draft.configuration.providerID) }
+    private var selectedLLMProvider: LLMProvider? {
+        settings.effectiveLLMProvider(for: draft.configuration.providerID)
+    }
     private var selectedImageProvider: ImageProvider? { settings.imageProvider(id: draft.configuration.providerID) }
     private var selectedVideoProvider: VideoProvider? { settings.videoProvider(id: draft.configuration.providerID) }
     private var selectedImageAdapter: MediaAdapterDescriptor? {
@@ -424,10 +443,43 @@ private struct WorkflowNodeConfigurationView: View {
 
     private var llmProviderPicker: some View {
         Picker("服务商", selection: $draft.configuration.providerID) {
-            Text("请选择").tag(Optional<UUID>.none)
+            Text(defaultLLMProviderTitle).tag(Optional<UUID>.none)
             ForEach(settings.providers) { provider in Text(provider.name).tag(Optional(provider.id)) }
         }
-        .onChange(of: draft.configuration.providerID) { _, _ in ensureModel(selectedLLMProvider?.models ?? []) }
+        .onChange(of: draft.configuration.providerID) { _, providerID in
+            if providerID == nil {
+                draft.configuration.model = ""
+            } else {
+                ensureModel(selectedLLMProvider?.models ?? [])
+            }
+        }
+    }
+
+    private var llmModelPicker: some View {
+        Picker("模型", selection: $draft.configuration.model) {
+            if draft.configuration.providerID == nil {
+                Text(defaultLLMModelTitle).tag("")
+            } else {
+                if draft.configuration.model.isEmpty { Text("请选择").tag("") }
+                ForEach(selectedLLMProvider?.models ?? [], id: \.self) { model in
+                    Text(model).tag(model)
+                }
+            }
+        }
+        .disabled(draft.configuration.providerID == nil)
+    }
+
+    private var defaultLLMProviderTitle: String {
+        guard let provider = settings.provider(id: settings.defaultLLMProviderID) else {
+            return "跟随全局默认（未配置）"
+        }
+        return "跟随全局默认（\(provider.name)）"
+    }
+
+    private var defaultLLMModelTitle: String {
+        settings.defaultLLMModel.isEmpty
+            ? "跟随全局默认（未配置）"
+            : "跟随全局默认（\(settings.defaultLLMModel)）"
     }
 
     private var imageProviderPicker: some View {

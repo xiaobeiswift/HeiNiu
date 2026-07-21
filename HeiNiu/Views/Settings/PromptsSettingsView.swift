@@ -54,7 +54,17 @@ struct PromptsSettingsView: View {
                         .frame(width: 240, alignment: .top)
 
                     if let item = selectedItem {
-                        PromptEditorPanel(itemID: item.id, onSaved: onSaved)
+                        PromptEditorPanel(
+                            itemID: item.id,
+                            onDuplicate: {
+                                if let copy = settings.duplicatePrompt(id: item.id) {
+                                    selectedCategory = copy.category
+                                    selectedID = copy.id
+                                }
+                                onSaved()
+                            },
+                            onSaved: onSaved
+                        )
                             .id(item.id)
                             .frame(maxWidth: .infinity, alignment: .top)
                     } else {
@@ -98,9 +108,7 @@ struct PromptsSettingsView: View {
                 pendingDelete = nil
             }
         } message: {
-            Text(pendingDelete?.isBuiltIn == true
-                 ? "这是预置提示词，删除后可在需要时再新建。"
-                 : "删除后不可恢复。")
+            Text("删除后不可恢复。")
         }
     }
 
@@ -227,6 +235,7 @@ struct PromptsSettingsView: View {
 ///
 /// `PromptListRow` 类型定义。
 private struct PromptListRow: View {
+    @Environment(SettingsStore.self) private var settings
     /// item。
     let item: PromptItem
     /// isSelected。
@@ -249,7 +258,7 @@ private struct PromptListRow: View {
                             .foregroundStyle(AppTheme.textPrimary)
                             .lineLimit(1)
                         if item.isBuiltIn {
-                            Text("预置")
+                            Text("内置")
                                 .font(.caption2.weight(.medium))
                                 .foregroundStyle(AppTheme.accent)
                                 .padding(.horizontal, 5)
@@ -257,7 +266,7 @@ private struct PromptListRow: View {
                                 .background(AppTheme.accentSoft, in: Capsule())
                         }
                     }
-                    Text(item.model.isEmpty ? "未绑定模型" : item.model)
+                    Text(modelSummary)
                         .font(.caption2.monospaced())
                         .foregroundStyle(AppTheme.textTertiary)
                         .lineLimit(1)
@@ -278,7 +287,9 @@ private struct PromptListRow: View {
 
             Menu {
                 Button("复制", action: onDuplicate)
-                Button("删除", role: .destructive, action: onDelete)
+                if !item.isBuiltIn {
+                    Button("删除", role: .destructive, action: onDelete)
+                }
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.caption.weight(.bold))
@@ -287,6 +298,12 @@ private struct PromptListRow: View {
             }
             .menuStyle(.borderlessButton)
         }
+    }
+
+    private var modelSummary: String {
+        let model = settings.effectiveLLMModel(providerID: item.providerID, model: item.model)
+        guard !model.isEmpty else { return "未配置默认模型" }
+        return item.providerID == nil ? "默认 · \(model)" : model
     }
 }
 
@@ -299,6 +316,8 @@ private struct PromptEditorPanel: View {
     /// itemID。
     @Environment(SettingsStore.self) private var settings
     let itemID: UUID
+    /// 复制当前条目并切换到可编辑副本。
+    let onDuplicate: () -> Void
     /// onSaved。
     let onSaved: () -> Void
 
@@ -318,10 +337,33 @@ private struct PromptEditorPanel: View {
         settings.provider(id: providerID)
     }
 
+    /// 当前条目是否为只读内置提示词。
+    private var isBuiltIn: Bool {
+        settings.promptItem(id: itemID)?.isBuiltIn == true
+    }
+
     /// SwiftUI 视图内容。
     var body: some View {
         // 自然高度布局：由设置页外层 ScrollView 滚动；模板框固定高度内部滚
         VStack(alignment: .leading, spacing: AppTheme.sectionSpacing) {
+            if isBuiltIn {
+                StudioCard {
+                    HStack(spacing: 12) {
+                        Label("内置提示词", systemImage: "lock.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(AppTheme.accent)
+                        Text("内容只读；复制为副本后可以自由修改。")
+                            .font(.callout)
+                            .foregroundStyle(AppTheme.textSecondary)
+                        Spacer()
+                        Button("复制为副本", action: onDuplicate)
+                            .buttonStyle(.borderedProminent)
+                            .tint(AppTheme.accent)
+                            .foregroundStyle(.black)
+                    }
+                }
+            }
+
             StudioCard(title: "基本信息") {
                 VStack(alignment: .leading, spacing: 14) {
                     StudioTextField(title: "名称", text: $name, placeholder: "例如：对白润色")
@@ -340,15 +382,16 @@ private struct PromptEditorPanel: View {
                     }
                 }
             }
+            .disabled(isBuiltIn)
 
-            StudioCard(title: "模型绑定", subtitle: "可覆盖默认服务商；留空则运行时再选") {
+            StudioCard(title: "模型绑定", subtitle: "可覆盖全局默认大模型；留空时自动继承") {
                 VStack(alignment: .leading, spacing: 14) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("服务商")
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(AppTheme.textSecondary)
                         Picker("服务商", selection: $providerID) {
-                            Text("未选择").tag(Optional<UUID>.none)
+                            Text("跟随全局默认").tag(Optional<UUID>.none)
                             ForEach(settings.providers) { provider in
                                 Text(provider.name).tag(Optional(provider.id))
                             }
@@ -357,7 +400,20 @@ private struct PromptEditorPanel: View {
                         .pickerStyle(.menu)
                     }
 
-                    if let provider = selectedProvider, !provider.models.isEmpty {
+                    if providerID == nil {
+                        HStack(spacing: 12) {
+                            Text("模型")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(AppTheme.textSecondary)
+                            Text(defaultModelSummary)
+                                .font(.callout.monospaced())
+                                .foregroundStyle(
+                                    settings.defaultLLMModel.isEmpty
+                                        ? AppTheme.danger
+                                        : AppTheme.textPrimary
+                                )
+                        }
+                    } else if let provider = selectedProvider, !provider.models.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("模型")
                                 .font(.subheadline.weight(.medium))
@@ -389,6 +445,7 @@ private struct PromptEditorPanel: View {
                     }
                 }
             }
+            .disabled(isBuiltIn)
 
             StudioCard {
                 VStack(alignment: .leading, spacing: 12) {
@@ -399,46 +456,54 @@ private struct PromptEditorPanel: View {
                         Text("\(template.count) 字")
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(AppTheme.textTertiary)
-                        Button("恢复模板") {
-                            settings.resetPromptTemplate(id: itemID)
-                            load()
-                            onSaved()
+                        if !isBuiltIn {
+                            Button("恢复模板") {
+                                settings.resetPromptTemplate(id: itemID)
+                                load()
+                                onSaved()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(AppTheme.accent)
                         }
-                        .buttonStyle(.plain)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(AppTheme.accent)
                     }
 
                     // 建议变量：属于模板，点击插入到光标位置
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 6) {
-                            Text("建议变量")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(AppTheme.textSecondary)
-                            Text("点击插入到光标处")
-                                .font(.caption2)
-                                .foregroundStyle(AppTheme.textTertiary)
-                        }
-                        FlowLayout(spacing: 8) {
-                            ForEach(category.variableChips, id: \.self) { chip in
-                                Button {
-                                    insertVariableChip(chip)
-                                } label: {
-                                    Text(chip)
-                                        .font(.caption.monospaced())
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 6)
-                                        .foregroundStyle(AppTheme.accent)
-                                        .background(AppTheme.accentSoft, in: Capsule())
+                    if !isBuiltIn {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Text("建议变量")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(AppTheme.textSecondary)
+                                Text("点击插入到光标处")
+                                    .font(.caption2)
+                                    .foregroundStyle(AppTheme.textTertiary)
+                            }
+                            FlowLayout(spacing: 8) {
+                                ForEach(category.variableChips, id: \.self) { chip in
+                                    Button {
+                                        insertVariableChip(chip)
+                                    } label: {
+                                        Text(chip)
+                                            .font(.caption.monospaced())
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .foregroundStyle(AppTheme.accent)
+                                            .background(AppTheme.accentSoft, in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("插入 \(chip)")
                                 }
-                                .buttonStyle(.plain)
-                                .help("插入 \(chip)")
                             }
                         }
                     }
 
                     // 固定高度：正文只在框内滚，外层设置页仍可整体滚动
-                    PromptTemplateNSEditor(text: $template, controller: templateController)
+                    PromptTemplateNSEditor(
+                        text: $template,
+                        controller: templateController,
+                        isEditable: !isBuiltIn
+                    )
                         .frame(maxWidth: .infinity)
                         .frame(height: 360)
                         .background(
@@ -463,6 +528,8 @@ private struct PromptEditorPanel: View {
                 if model.isEmpty || !provider.models.contains(model) {
                     model = provider.models.first ?? ""
                 }
+            } else {
+                model = ""
             }
             scheduleSave()
         }
@@ -501,13 +568,20 @@ private struct PromptEditorPanel: View {
         }
     }
 
+    private var defaultModelSummary: String {
+        guard let provider = settings.provider(id: settings.defaultLLMProviderID),
+              !settings.defaultLLMModel.isEmpty
+        else { return "尚未配置默认大模型" }
+        return "\(provider.name) · \(settings.defaultLLMModel)"
+    }
+
     private func scheduleSave() {
-        guard ready else { return }
+        guard ready, !isBuiltIn else { return }
         debouncer.schedule { save() }
     }
 
     private func save() {
-        guard var item = settings.promptItem(id: itemID) else { return }
+        guard var item = settings.promptItem(id: itemID), !item.isBuiltIn else { return }
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         item.name = trimmedName.isEmpty ? "未命名提示词" : trimmedName
         item.template = template
@@ -551,6 +625,8 @@ private final class PromptTemplateEditorController {
 private struct PromptTemplateNSEditor: NSViewRepresentable {
     @Binding var text: String
     var controller: PromptTemplateEditorController
+    /// 是否允许修改；只读状态仍允许选择和复制正文。
+    var isEditable: Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -567,6 +643,8 @@ private struct PromptTemplateNSEditor: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView else { return scrollView }
         textView.delegate = context.coordinator
         textView.isRichText = false
+        textView.isEditable = isEditable
+        textView.isSelectable = true
         textView.allowsUndo = true
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -593,8 +671,10 @@ private struct PromptTemplateNSEditor: NSViewRepresentable {
     }
 
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
         controller.textView = context.coordinator.textView
         guard let textView = context.coordinator.textView else { return }
+        textView.isEditable = isEditable
         if textView.string != text {
             let selected = textView.selectedRange()
             textView.string = text
@@ -614,6 +694,7 @@ private struct PromptTemplateNSEditor: NSViewRepresentable {
         }
 
         func textDidChange(_ notification: Notification) {
+            guard parent.isEditable else { return }
             guard let textView = notification.object as? NSTextView else { return }
             if parent.text != textView.string {
                 parent.text = textView.string

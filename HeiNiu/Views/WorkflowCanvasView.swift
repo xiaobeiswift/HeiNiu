@@ -37,6 +37,8 @@ struct WorkflowCanvasView: View {
     @Environment(SettingsStore.self) private var settings
     let workflow: WorkflowDefinition
     let activeRun: WorkflowRun?
+    /// 是否仅允许查看和运行，不允许修改节点或连线。
+    let isReadOnly: Bool
     @Binding var selectedNodeID: UUID?
     @Binding var selectedConnectionID: UUID?
     @Binding var inspectorTab: WorkflowInspectorTab
@@ -59,6 +61,7 @@ struct WorkflowCanvasView: View {
     init(
         workflow: WorkflowDefinition,
         activeRun: WorkflowRun?,
+        isReadOnly: Bool,
         selectedNodeID: Binding<UUID?>,
         selectedConnectionID: Binding<UUID?>,
         inspectorTab: Binding<WorkflowInspectorTab>,
@@ -70,6 +73,7 @@ struct WorkflowCanvasView: View {
     ) {
         self.workflow = workflow
         self.activeRun = activeRun
+        self.isReadOnly = isReadOnly
         _selectedNodeID = selectedNodeID
         _selectedConnectionID = selectedConnectionID
         _inspectorTab = inspectorTab
@@ -123,6 +127,7 @@ struct WorkflowCanvasView: View {
                             node: displayedNode,
                             width: nodeWidth,
                             zoom: zoom,
+                            isReadOnly: isReadOnly,
                             isSelected: selectedNodeID == node.id,
                             pendingPort: pendingPort,
                             run: activeRun?.nodeRun(id: node.id),
@@ -136,6 +141,7 @@ struct WorkflowCanvasView: View {
                                 inspectorTab = .usage
                             },
                             onMoveChanged: { position in
+                                guard !isReadOnly else { return }
                                 var transaction = Transaction()
                                 transaction.animation = nil
                                 withTransaction(transaction) {
@@ -143,13 +149,18 @@ struct WorkflowCanvasView: View {
                                 }
                             },
                             onMoveEnded: { position in
+                                guard !isReadOnly else { return }
                                 var updated = node
                                 updated.position = position
                                 onUpdateNode(updated)
                                 dragPreview = nil
                             },
-                            onDelete: { onDeleteNode(node.id) },
+                            onDelete: {
+                                guard !isReadOnly else { return }
+                                onDeleteNode(node.id)
+                            },
                             onOutputPort: { port in
+                                guard !isReadOnly else { return }
                                 selectedNodeID = node.id
                                 selectedConnectionID = nil
                                 let next = WorkflowPendingPort(nodeID: node.id, portID: port.id, title: "\(node.displayTitle) · \(port.title)")
@@ -157,6 +168,7 @@ struct WorkflowCanvasView: View {
                                 connectionMessage = nil
                             },
                             onInputPort: { port in
+                                guard !isReadOnly else { return }
                                 selectedNodeID = node.id
                                 selectedConnectionID = nil
                                 guard let source = pendingPort else { return }
@@ -356,6 +368,7 @@ struct WorkflowCanvasView: View {
     }
 
     private func deleteSelection() {
+        guard !isReadOnly else { return }
         if let selectedNodeID {
             onDeleteNode(selectedNodeID)
             self.selectedNodeID = nil
@@ -392,6 +405,7 @@ private struct WorkflowNodeCard: View {
     let node: WorkflowNode
     let width: CGFloat
     let zoom: Double
+    let isReadOnly: Bool
     let isSelected: Bool
     let pendingPort: WorkflowPendingPort?
     let run: WorkflowNodeRun?
@@ -501,6 +515,7 @@ private struct WorkflowNodeCard: View {
         .highPriorityGesture(
             DragGesture(minimumDistance: 2, coordinateSpace: .global)
                 .onChanged { value in
+                    guard !isReadOnly else { return }
                     if !isDragging {
                         isDragging = true
                         onSelect()
@@ -508,14 +523,17 @@ private struct WorkflowNodeCard: View {
                     onMoveChanged(dragPosition(for: value.translation))
                 }
                 .onEnded { value in
+                    guard !isReadOnly else { return }
                     onMoveEnded(dragPosition(for: value.translation))
                     isDragging = false
                 }
         )
         .contextMenu {
             Button("查看用法", action: onShowUsage)
-            Divider()
-            Button("删除节点", role: .destructive, action: onDelete)
+            if !isReadOnly {
+                Divider()
+                Button("删除节点", role: .destructive, action: onDelete)
+            }
         }
     }
 
@@ -543,6 +561,7 @@ private struct WorkflowNodeCard: View {
                 .overlay(Circle().stroke(Color.primary.opacity(0.25), lineWidth: 1))
         }
         .buttonStyle(.plain)
+        .disabled(isReadOnly)
         .help("\(port.valueType.title) · \(port.isRequired ? "必填" : "可选")\n\(port.help)")
     }
 }

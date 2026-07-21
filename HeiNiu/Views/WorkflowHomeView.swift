@@ -43,6 +43,7 @@ struct WorkflowHomeView: View {
                     WorkflowCanvasView(
                         workflow: workflow,
                         activeRun: activeRun,
+                        isReadOnly: workflow.isBuiltIn,
                         selectedNodeID: $selectedNodeID,
                         selectedConnectionID: $selectedConnectionID,
                         inspectorTab: $inspectorTab,
@@ -62,7 +63,7 @@ struct WorkflowHomeView: View {
                             )
                         },
                         onUpdateViewport: { viewport in
-                            store.mutateWorkflow(id: workflow.id) { $0.viewport = viewport }
+                            store.updateViewport(viewport, in: workflow.id)
                         }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -72,6 +73,7 @@ struct WorkflowHomeView: View {
                     WorkflowInspectorView(
                         workflow: workflow,
                         node: selectedNode,
+                        isReadOnly: workflow.isBuiltIn,
                         tab: $inspectorTab,
                         selectedHistoryRunID: $selectedHistoryRunID,
                         onUpdateNode: { store.updateNode($0, in: workflow.id) },
@@ -121,8 +123,10 @@ struct WorkflowHomeView: View {
             }
         }
         .sheet(item: $workflowToRename) { workflow in
-            WorkflowNameSheet(title: "重命名工作流", initialName: workflow.name) { name in
-                store.renameWorkflow(id: workflow.id, name: name)
+            if !workflow.isBuiltIn {
+                WorkflowNameSheet(title: "重命名工作流", initialName: workflow.name) { name in
+                    store.renameWorkflow(id: workflow.id, name: name)
+                }
             }
         }
         .sheet(isPresented: $showValidation) {
@@ -145,8 +149,10 @@ struct WorkflowHomeView: View {
         ) {
             Button("删除工作流和全部历史", role: .destructive) {
                 if let id = workflowToDelete?.id {
-                    store.deleteWorkflow(id: id)
-                    selectWorkflow(store.workflows.first?.id)
+                    if workflowToDelete?.isBuiltIn == false {
+                        store.deleteWorkflow(id: id)
+                        selectWorkflow(store.workflows.first?.id)
+                    }
                 }
                 workflowToDelete = nil
             }
@@ -175,9 +181,19 @@ struct WorkflowHomeView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("工作流")
                     .font(.largeTitle.weight(.bold))
-                Text(workflow?.name ?? "节点式创作编排")
-                    .font(.callout)
-                    .foregroundStyle(AppTheme.textSecondary)
+                HStack(spacing: 7) {
+                    Text(workflow?.name ?? "节点式创作编排")
+                        .font(.callout)
+                        .foregroundStyle(AppTheme.textSecondary)
+                    if workflow?.isBuiltIn == true {
+                        Text("内置")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(AppTheme.accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(AppTheme.accentSoft, in: Capsule())
+                    }
+                }
             }
             Spacer()
             if let message = executor.statusMessage {
@@ -187,18 +203,27 @@ struct WorkflowHomeView: View {
                     .lineLimit(1)
             }
             if let workflow {
-                Menu {
-                    ForEach(WorkflowNodeCatalog.all) { descriptor in
-                        Button {
-                            addNode(descriptor.kind, workflow: workflow)
-                        } label: {
-                            Label(descriptor.title, systemImage: descriptor.systemImage)
-                        }
+                if workflow.isBuiltIn {
+                    Button {
+                        duplicateAndSelect(workflow.id)
+                    } label: {
+                        Label("复制", systemImage: "doc.on.doc")
                     }
-                } label: {
-                    Label("添加节点", systemImage: "plus.square.on.square")
+                    .help("复制为可编辑工作流")
+                } else {
+                    Menu {
+                        ForEach(WorkflowNodeCatalog.all) { descriptor in
+                            Button {
+                                addNode(descriptor.kind, workflow: workflow)
+                            } label: {
+                                Label(descriptor.title, systemImage: descriptor.systemImage)
+                            }
+                        }
+                    } label: {
+                        Label("添加节点", systemImage: "plus.square.on.square")
+                    }
+                    .help("向画布添加原子能力节点")
                 }
-                .help("向画布添加原子能力节点")
 
                 Button {
                     executor.validationIssues = WorkflowValidator.validate(workflow, settings: settings)
@@ -262,7 +287,17 @@ struct WorkflowHomeView: View {
                                 Image(systemName: "point.3.connected.trianglepath.dotted")
                                     .foregroundStyle(selectedWorkflowID == item.id ? AppTheme.accent : AppTheme.textSecondary)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(item.name).font(.callout.weight(.medium)).lineLimit(1)
+                                    HStack(spacing: 5) {
+                                        Text(item.name).font(.callout.weight(.medium)).lineLimit(1)
+                                        if item.isBuiltIn {
+                                            Text("内置")
+                                                .font(.caption2.weight(.semibold))
+                                                .foregroundStyle(AppTheme.accent)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(AppTheme.accentSoft, in: Capsule())
+                                        }
+                                    }
                                     Text("\(item.nodes.count) 节点 · \(store.runsByWorkflowID[item.id]?.count ?? 0) 次运行")
                                         .font(.caption2)
                                         .foregroundStyle(AppTheme.textTertiary)
@@ -278,12 +313,14 @@ struct WorkflowHomeView: View {
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
-                            Button("重命名") { workflowToRename = item }
                             Button("复制") {
-                                if let id = store.duplicateWorkflow(id: item.id) { selectWorkflow(id) }
+                                duplicateAndSelect(item.id)
                             }
-                            Divider()
-                            Button("删除", role: .destructive) { workflowToDelete = item }
+                            if !item.isBuiltIn {
+                                Button("重命名") { workflowToRename = item }
+                                Divider()
+                                Button("删除", role: .destructive) { workflowToDelete = item }
+                            }
                         }
                     }
                 }
@@ -313,6 +350,13 @@ struct WorkflowHomeView: View {
 
     private func addStarterWorkflow() {
         selectWorkflow(store.addStarterWorkflow())
+    }
+
+    /// 复制工作流并选中可编辑副本。
+    private func duplicateAndSelect(_ id: UUID) {
+        if let copyID = store.duplicateWorkflow(id: id) {
+            selectWorkflow(copyID)
+        }
     }
 
     private func addNode(_ kind: WorkflowNodeKind, workflow: WorkflowDefinition) {

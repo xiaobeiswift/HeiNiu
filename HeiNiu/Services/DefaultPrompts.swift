@@ -150,7 +150,7 @@ enum DefaultPrompts {
     /// “添加知识库”内置工作流保存的默认快照，保持对旧调用点的兼容。
     static let knowledgeImportPromptTemplate = productKnowledgeImportPromptTemplate
 
-    /// 首次启动预置的多条提示词（按创作环节分组）
+    /// 首次启动内置的多条提示词（按创作环节分组）
     static func seedItems() -> [PromptItem] {
         var items: [PromptItem] = []
         var order = 0

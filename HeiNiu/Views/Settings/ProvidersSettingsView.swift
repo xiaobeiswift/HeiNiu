@@ -27,7 +27,7 @@ struct ProvidersSettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("API 服务商")
                         .font(.title3.weight(.semibold))
-                    Text(settings.providers.isEmpty ? "添加后即可在提示词中绑定模型" : "已配置 \(settings.providers.count) 家")
+                    Text(settings.providers.isEmpty ? "添加后即可设置默认大模型" : "已配置 \(settings.providers.count) 家")
                         .font(.callout)
                         .foregroundStyle(AppTheme.textSecondary)
                 }
@@ -42,6 +42,8 @@ struct ProvidersSettingsView: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            defaultLLMCard
 
             embeddingCard
 
@@ -94,7 +96,7 @@ struct ProvidersSettingsView: View {
                 pendingDelete = nil
             }
         } message: {
-            Text("API Key 将从钥匙串移除，相关提示词绑定会被清空。")
+            Text("API Key 将从钥匙串移除；默认大模型、嵌入配置及相关提示词绑定也会按需清空。")
         }
         // 进入页面默认全部折叠，不自动展开
     }
@@ -110,6 +112,92 @@ struct ProvidersSettingsView: View {
             expandedID = provider.id
         }
         onSaved()
+    }
+
+    /// 未单独绑定的提示词和工作流节点共同继承的默认文本/视觉模型。
+    private var defaultLLMCard: some View {
+        StudioCard(
+            title: "默认大模型",
+            subtitle: "内置提示词和未单独绑定的 LLM 节点会自动继承；图片知识入库需要服务商支持视觉。"
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Text("服务商")
+                        .frame(width: 64, alignment: .leading)
+                        .foregroundStyle(AppTheme.textSecondary)
+                    Picker("服务商", selection: defaultLLMProviderBinding) {
+                        Text("未配置").tag(Optional<UUID>.none)
+                        ForEach(settings.providers) { provider in
+                            Text(provider.name).tag(Optional(provider.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                HStack(spacing: 12) {
+                    Text("模型")
+                        .frame(width: 64, alignment: .leading)
+                        .foregroundStyle(AppTheme.textSecondary)
+                    if let provider = settings.provider(id: settings.defaultLLMProviderID),
+                       !provider.models.isEmpty {
+                        Picker("模型", selection: defaultLLMModelBinding) {
+                            if !settings.defaultLLMModel.isEmpty,
+                               !provider.models.contains(settings.defaultLLMModel) {
+                                Text(settings.defaultLLMModel).tag(settings.defaultLLMModel)
+                            }
+                            ForEach(provider.models, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        TextField("模型 ID", text: defaultLLMModelBinding)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(settings.defaultLLMProviderID == nil)
+                    }
+                }
+
+                if let provider = settings.provider(id: settings.defaultLLMProviderID) {
+                    HStack(spacing: 8) {
+                        StatusBadge(text: provider.protocolBadgeText, style: .neutral)
+                        if provider.supportsVision {
+                            StatusBadge(text: "支持视觉", style: .accent, systemImage: "eye")
+                        } else {
+                            Label("可用于文本任务；运行图片知识入库前需改用支持视觉的服务商。", systemImage: "exclamationmark.triangle")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.textTertiary)
+                        }
+                    }
+                } else {
+                    Text(settings.providers.isEmpty ? "请先添加 API 服务商。" : "请选择默认服务商和模型。")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.textTertiary)
+                }
+            }
+        }
+    }
+
+    private var defaultLLMProviderBinding: Binding<UUID?> {
+        Binding(
+            get: { settings.defaultLLMProviderID },
+            set: { providerID in
+                let model = settings.provider(id: providerID)?.models.first ?? ""
+                settings.setDefaultLLM(providerID: providerID, model: model)
+                onSaved()
+            }
+        )
+    }
+
+    private var defaultLLMModelBinding: Binding<String> {
+        Binding(
+            get: { settings.defaultLLMModel },
+            set: { model in
+                settings.setDefaultLLM(providerID: settings.defaultLLMProviderID, model: model)
+                onSaved()
+            }
+        )
     }
 
     private var embeddingCard: some View {
@@ -336,6 +424,9 @@ private struct ProviderCard: View {
                     .font(.headline)
                 HStack(spacing: 8) {
                     StatusBadge(text: draft.protocolBadgeText, style: .accent)
+                    if settings.defaultLLMProviderID == provider.id {
+                        StatusBadge(text: "默认", style: .accent, systemImage: "checkmark.circle")
+                    }
                     StatusBadge(text: "\(draft.models.count) 模型", style: .neutral)
                     if draft.supportsVision {
                         StatusBadge(text: "视觉", style: .neutral, systemImage: "eye")

@@ -22,6 +22,7 @@ final class WorkflowModelTests: XCTestCase {
         XCTAssertEqual(tolerant.name, "旧工作流")
         XCTAssertEqual(tolerant.nodes.first?.position, .zero)
         XCTAssertEqual(tolerant.nodes.first?.configuration.parameterName, "输入")
+        XCTAssertFalse(tolerant.isBuiltIn)
         XCTAssertTrue(tolerant.connections.isEmpty)
     }
 
@@ -73,6 +74,8 @@ final class WorkflowModelTests: XCTestCase {
         let workflow = WorkflowDefinition.knowledgeImport()
         XCTAssertEqual(workflow.id, WorkflowDefinition.knowledgeImportWorkflowID)
         XCTAssertEqual(workflow.name, "添加知识库")
+        XCTAssertTrue(workflow.isBuiltIn)
+        XCTAssertFalse(WorkflowDefinition.starter().isBuiltIn)
         XCTAssertEqual(workflow.nodes.filter { $0.kind == .runtimeInput }.count, 4)
         XCTAssertTrue(workflow.nodes.contains {
             $0.kind == .runtimeInput && $0.configuration.runtimeInputType == .folder
@@ -103,6 +106,87 @@ final class WorkflowModelTests: XCTestCase {
         })
         XCTAssertEqual(workflow.connections.count, 5)
         XCTAssertEqual(WorkflowValidator.estimateCosts(workflow).llmCalls, 50)
+    }
+
+    @MainActor
+    func testBuiltInWorkflowRejectsEditsAndCreatesEditableCopy() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeiNiuBuiltInWorkflow-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkflowStore(rootURL: root)
+        let builtInID = WorkflowDefinition.knowledgeImportWorkflowID
+        let original = try XCTUnwrap(store.workflow(id: builtInID))
+
+        store.renameWorkflow(id: builtInID, name: "被修改")
+        store.mutateWorkflow(id: builtInID) { $0.nodes.removeAll() }
+        XCTAssertNil(store.addNode(kind: .llm, to: builtInID, at: .zero))
+        store.deleteWorkflow(id: builtInID)
+
+        let unchanged = try XCTUnwrap(store.workflow(id: builtInID))
+        XCTAssertEqual(unchanged.name, original.name)
+        XCTAssertEqual(unchanged.nodes, original.nodes)
+        XCTAssertEqual(store.lastError, "内置工作流不可编辑，请先复制")
+
+        let connectionResult = store.addConnection(
+            sourceNodeID: UUID(),
+            sourcePortID: "text",
+            targetNodeID: UUID(),
+            targetPortID: "prompt",
+            in: builtInID
+        )
+        guard case .failure(.readOnlyBuiltIn) = connectionResult else {
+            return XCTFail("内置工作流连线应被数据层拒绝")
+        }
+
+        let copyID = try XCTUnwrap(store.duplicateWorkflow(id: builtInID))
+        let copy = try XCTUnwrap(store.workflow(id: copyID))
+        XCTAssertFalse(copy.isBuiltIn)
+        XCTAssertNotEqual(copy.id, builtInID)
+        XCTAssertEqual(copy.nodes.count, original.nodes.count)
+
+        store.renameWorkflow(id: copyID, name: "我的知识入库")
+        XCTAssertEqual(store.workflow(id: copyID)?.name, "我的知识入库")
+    }
+
+    @MainActor
+    func testGlobalDefaultLLMResolvesForBuiltInWorkflowAndBackup() throws {
+        let provider = LLMProvider(
+            name: "默认视觉服务",
+            protocolType: .openAICompatible,
+            models: ["vision-model"],
+            supportsVision: true
+        )
+        let settings = SettingsStore()
+        settings.providers = [provider]
+        settings.defaultLLMProviderID = provider.id
+        settings.defaultLLMModel = "vision-model"
+
+        XCTAssertEqual(settings.effectiveLLMProvider(for: nil)?.id, provider.id)
+        XCTAssertEqual(settings.effectiveLLMModel(providerID: nil, model: ""), "vision-model")
+        XCTAssertNil(settings.effectiveLLMProvider(for: UUID()))
+        XCTAssertEqual(settings.effectiveLLMModel(providerID: provider.id, model: ""), "")
+
+        let workflow = WorkflowDefinition.knowledgeImport()
+        let issues = WorkflowValidator.validate(workflow, settings: settings)
+        XCTAssertFalse(issues.contains { $0.message.contains("默认大模型") })
+        XCTAssertFalse(issues.contains { $0.message.contains("未开启视觉能力") })
+
+        let backup = SettingsBackup(
+            includeAPIKeys: false,
+            providers: [provider],
+            defaultLLMProviderID: provider.id,
+            defaultLLMModel: "vision-model",
+            promptItems: [],
+            imageProviders: [],
+            videoProviders: []
+        )
+        let decoded = try JSONDecoder().decode(
+            SettingsBackup.self,
+            from: JSONEncoder().encode(backup)
+        )
+        XCTAssertEqual(decoded.defaultLLMProviderID, provider.id)
+        XCTAssertEqual(decoded.defaultLLMModel, "vision-model")
+        XCTAssertEqual(decoded.formatVersion, SettingsBackup.currentFormatVersion)
     }
 
     @MainActor
@@ -462,24 +546,38 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
         importNode.configuration.collectionID = oldCollectionID
         importNode.configuration.systemPrompt = "保留我的补充要求"
         importNode.configuration.model = "vision-model"
-        store.mutateWorkflow(id: workflow.id) { draft in
-            draft.nodes.removeAll {
-                $0.kind == .runtimeInput &&
-                ($0.configuration.runtimeInputType == .prompt ||
-                 $0.configuration.runtimeInputType == .knowledgeCollection)
-            }
-            draft.connections.removeAll {
-                $0.targetNodeID == importNode.id &&
-                ($0.targetPortID == "prompt" || $0.targetPortID == "collection")
-            }
-            if let index = draft.nodes.firstIndex(where: { $0.id == importNode.id }) {
-                draft.nodes[index] = importNode
-            }
+        var legacyWorkflow = workflow
+        legacyWorkflow.isBuiltIn = false
+        legacyWorkflow.nodes.removeAll {
+            $0.kind == .runtimeInput &&
+            ($0.configuration.runtimeInputType == .prompt ||
+             $0.configuration.runtimeInputType == .knowledgeCollection)
         }
-        store.saveNow()
+        legacyWorkflow.connections.removeAll {
+            $0.targetNodeID == importNode.id &&
+            ($0.targetPortID == "prompt" || $0.targetPortID == "collection")
+        }
+        if let index = legacyWorkflow.nodes.firstIndex(where: { $0.id == importNode.id }) {
+            legacyWorkflow.nodes[index] = importNode
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encodedWorkflow = try encoder.encode(legacyWorkflow)
+        let workflowObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encodedWorkflow) as? [String: Any]
+        )
+        let legacyFile = try JSONSerialization.data(
+            withJSONObject: ["formatVersion": 3, "workflows": [workflowObject]],
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try legacyFile.write(
+            to: root.appendingPathComponent("workflows.json"),
+            options: .atomic
+        )
 
         let reloaded = WorkflowStore(rootURL: root)
         let upgradedWorkflow = try XCTUnwrap(reloaded.workflow(id: WorkflowDefinition.knowledgeImportWorkflowID))
+        XCTAssertTrue(upgradedWorkflow.isBuiltIn)
         let upgraded = try XCTUnwrap(
             upgradedWorkflow.nodes.first {
                 $0.kind == .knowledgeImport

@@ -97,7 +97,7 @@ enum WorkflowValidator {
                 }
             case .knowledgeImport:
                 validateLLM(node, settings: settings, issues: &issues)
-                if let provider = settings.provider(id: node.configuration.providerID), !provider.supportsVision {
+                if let provider = settings.effectiveLLMProvider(for: node.configuration.providerID), !provider.supportsVision {
                     issues.append(error("“\(provider.name)”未开启视觉能力，不能用于图片知识入库", node.id))
                 }
                 if !(1...500).contains(node.configuration.maxFiles) {
@@ -254,15 +254,19 @@ enum WorkflowValidator {
         settings: SettingsStore,
         issues: inout [WorkflowValidationIssue]
     ) {
-        guard let provider = settings.provider(id: node.configuration.providerID) else {
-            issues.append(error("“\(node.displayTitle)”还没有选择 LLM 服务商", node.id))
+        guard let provider = settings.effectiveLLMProvider(for: node.configuration.providerID) else {
+            issues.append(error("“\(node.displayTitle)”还没有可用的 LLM 服务商，请先设置默认大模型", node.id))
             return
         }
         if settings.apiKey(for: provider.id).isEmpty {
             issues.append(error("“\(provider.name)”还没有配置 API Key", node.id))
         }
-        if node.configuration.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            issues.append(error("“\(node.displayTitle)”还没有选择模型", node.id))
+        let model = settings.effectiveLLMModel(
+            providerID: node.configuration.providerID,
+            model: node.configuration.model
+        )
+        if model.isEmpty {
+            issues.append(error("“\(node.displayTitle)”还没有可用模型，请先设置默认大模型", node.id))
         }
     }
 

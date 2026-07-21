@@ -7,12 +7,14 @@ import Observation
 enum WorkflowStoreError: LocalizedError {
     case missingWorkflow
     case missingNode
+    case readOnlyBuiltIn
     case invalidConnection(String)
 
     var errorDescription: String? {
         switch self {
         case .missingWorkflow: "工作流不存在"
         case .missingNode: "节点不存在"
+        case .readOnlyBuiltIn: "内置工作流不可编辑，请先复制"
         case .invalidConnection(let message): message
         }
     }
@@ -90,7 +92,7 @@ final class WorkflowStore {
 
     /// 重命名工作流。
     func renameWorkflow(id: UUID, name: String) {
-        guard let index = workflows.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = editableWorkflowIndex(id: id) else { return }
         let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         workflows[index].name = clean
@@ -125,6 +127,7 @@ final class WorkflowStore {
         let copy = WorkflowDefinition(
             id: newID,
             name: availableName(base: source.name + " 副本"),
+            isBuiltIn: false,
             nodes: nodes,
             connections: connections,
             viewport: source.viewport
@@ -136,6 +139,7 @@ final class WorkflowStore {
 
     /// 删除工作流及其全部运行历史和媒体。
     func deleteWorkflow(id: UUID) {
+        guard editableWorkflowIndex(id: id) != nil else { return }
         workflows.removeAll { $0.id == id }
         runsByWorkflowID[id] = nil
         if activeRun?.workflowID == id { activeRun = nil }
@@ -152,8 +156,9 @@ final class WorkflowStore {
 
     /// 用一份完整的新定义替换工作流。
     func updateWorkflow(_ workflow: WorkflowDefinition) {
-        guard let index = workflows.firstIndex(where: { $0.id == workflow.id }) else { return }
+        guard let index = editableWorkflowIndex(id: workflow.id) else { return }
         var updated = workflow
+        updated.isBuiltIn = false
         updated.updatedAt = Date()
         workflows[index] = updated
         scheduleSave()
@@ -161,7 +166,7 @@ final class WorkflowStore {
 
     /// 修改工作流定义并自动保存。
     func mutateWorkflow(id: UUID, _ mutation: (inout WorkflowDefinition) -> Void) {
-        guard let index = workflows.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = editableWorkflowIndex(id: id) else { return }
         mutation(&workflows[index])
         workflows[index].updatedAt = Date()
         scheduleSave()
@@ -170,7 +175,7 @@ final class WorkflowStore {
     /// 添加节点并返回 ID。
     @discardableResult
     func addNode(kind: WorkflowNodeKind, to workflowID: UUID, at position: WorkflowPoint) -> UUID? {
-        guard let index = workflows.firstIndex(where: { $0.id == workflowID }) else { return nil }
+        guard let index = editableWorkflowIndex(id: workflowID) else { return nil }
         var configuration = WorkflowNodeConfiguration()
         switch kind {
         case .runtimeInput:
@@ -245,6 +250,10 @@ final class WorkflowStore {
             return .failure(.missingWorkflow)
         }
         var workflow = workflows[workflowIndex]
+        guard !workflow.isBuiltIn else {
+            lastError = WorkflowStoreError.readOnlyBuiltIn.localizedDescription
+            return .failure(.readOnlyBuiltIn)
+        }
         guard sourceNodeID != targetNodeID,
               let source = workflow.nodes.first(where: { $0.id == sourceNodeID }),
               let target = workflow.nodes.first(where: { $0.id == targetNodeID })
@@ -291,6 +300,13 @@ final class WorkflowStore {
         mutateWorkflow(id: workflowID) { workflow in
             workflow.connections.removeAll { $0.id == id }
         }
+    }
+
+    /// 保存画布查看位置；该状态不改变模板内容，内置工作流也允许记录。
+    func updateViewport(_ viewport: WorkflowViewport, in workflowID: UUID) {
+        guard let index = workflows.firstIndex(where: { $0.id == workflowID }) else { return }
+        workflows[index].viewport = viewport
+        scheduleSave()
     }
 
     // MARK: - Run history
@@ -418,6 +434,9 @@ final class WorkflowStore {
                 workflows.insert(WorkflowDefinition.knowledgeImport(), at: 0)
                 needsSave = true
             }
+            if normalizeBuiltInFlags() {
+                needsSave = true
+            }
             if upgradeKnowledgeImportInputsIfNeeded() {
                 needsSave = true
             }
@@ -512,6 +531,32 @@ final class WorkflowStore {
             if changedWorkflow { workflows[workflowIndex].updatedAt = Date() }
         }
         return changed
+    }
+
+    /// 只允许应用声明的稳定模板 ID 带有内置标记，并升级旧版安装。
+    private func normalizeBuiltInFlags() -> Bool {
+        var changed = false
+        for index in workflows.indices {
+            let shouldBeBuiltIn = workflows[index].id == WorkflowDefinition.knowledgeImportWorkflowID
+            if workflows[index].isBuiltIn != shouldBeBuiltIn {
+                workflows[index].isBuiltIn = shouldBeBuiltIn
+                changed = true
+            }
+        }
+        return changed
+    }
+
+    /// 返回可编辑工作流下标；内置模板在数据层拒绝一切内容修改。
+    private func editableWorkflowIndex(id: UUID) -> Int? {
+        guard let index = workflows.firstIndex(where: { $0.id == id }) else {
+            lastError = WorkflowStoreError.missingWorkflow.localizedDescription
+            return nil
+        }
+        guard !workflows[index].isBuiltIn else {
+            lastError = WorkflowStoreError.readOnlyBuiltIn.localizedDescription
+            return nil
+        }
+        return index
     }
 
     private func availableName(base: String) -> String {

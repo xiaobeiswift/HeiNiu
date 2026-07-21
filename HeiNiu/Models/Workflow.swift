@@ -720,6 +720,8 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
     var formatVersion: Int
     var id: UUID
     var name: String
+    /// 是否为应用内置模板；内置模板只读，只能复制后编辑。
+    var isBuiltIn: Bool
     var nodes: [WorkflowNode]
     var connections: [WorkflowConnection]
     var viewport: WorkflowViewport
@@ -731,6 +733,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
     init(
         id: UUID = UUID(),
         name: String,
+        isBuiltIn: Bool = false,
         nodes: [WorkflowNode] = [],
         connections: [WorkflowConnection] = [],
         viewport: WorkflowViewport = WorkflowViewport(),
@@ -740,6 +743,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
         formatVersion = Self.currentFormatVersion
         self.id = id
         self.name = name
+        self.isBuiltIn = isBuiltIn
         self.nodes = nodes
         self.connections = connections
         self.viewport = viewport
@@ -752,6 +756,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
         formatVersion = max(Self.currentFormatVersion, try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1)
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? "未命名工作流"
+        isBuiltIn = try container.decodeIfPresent(Bool.self, forKey: .isBuiltIn) ?? false
         nodes = try container.decodeIfPresent([WorkflowNode].self, forKey: .nodes) ?? []
         connections = try container.decodeIfPresent([WorkflowConnection].self, forKey: .connections) ?? []
         viewport = try container.decodeIfPresent(WorkflowViewport.self, forKey: .viewport) ?? WorkflowViewport()
@@ -840,6 +845,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
         return WorkflowDefinition(
             id: knowledgeImportWorkflowID,
             name: "添加知识库",
+            isBuiltIn: true,
             nodes: [folder, instructions, prompt, collection, knowledgeImport, output],
             connections: [
                 WorkflowConnection(sourceNodeID: folder.id, sourcePortID: "folder", targetNodeID: knowledgeImport.id, targetPortID: "folder"),

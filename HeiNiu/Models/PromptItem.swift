@@ -25,7 +25,7 @@ struct PromptItem: Identifiable, Codable, Hashable {
     var model: String
     /// 采样温度。
     var temperature: Double
-    /// 是否为系统预置（影响删除提示文案）。
+    /// 是否为系统内置；内置条目只读，只能复制为自定义副本。
     var isBuiltIn: Bool
     /// 同分类内排序权重，越小越靠前。
     var sortOrder: Int

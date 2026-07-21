@@ -20,6 +20,9 @@ struct SettingsBackup: Codable {
     ///
     /// LLM 服务商列表。
     var providers: [LLMProvider]
+    /// 未单独绑定时使用的全局默认 LLM 服务商与模型。
+    var defaultLLMProviderID: UUID?
+    var defaultLLMModel: String
     /// 知识库嵌入服务商与模型配置（不含 Key）。
     var knowledgeEmbeddingProviderID: UUID?
     var knowledgeEmbeddingModel: String
@@ -37,7 +40,7 @@ struct SettingsBackup: Codable {
     /// 生视频 Key 字典。
     var videoAPIKeys: [String: String]
 
-    static let currentFormatVersion = 3
+    static let currentFormatVersion = 4
 
     /// 初始化方法
     ///
@@ -48,6 +51,8 @@ struct SettingsBackup: Codable {
         appVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0",
         includeAPIKeys: Bool,
         providers: [LLMProvider],
+        defaultLLMProviderID: UUID? = nil,
+        defaultLLMModel: String = "",
         knowledgeEmbeddingProviderID: UUID? = nil,
         knowledgeEmbeddingModel: String = "",
         knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode = .openAIText,
@@ -63,6 +68,8 @@ struct SettingsBackup: Codable {
         self.appVersion = appVersion
         self.includeAPIKeys = includeAPIKeys
         self.providers = providers
+        self.defaultLLMProviderID = defaultLLMProviderID
+        self.defaultLLMModel = defaultLLMModel
         self.knowledgeEmbeddingProviderID = knowledgeEmbeddingProviderID
         self.knowledgeEmbeddingModel = knowledgeEmbeddingModel
         self.knowledgeEmbeddingAPIMode = knowledgeEmbeddingAPIMode
@@ -84,6 +91,8 @@ struct SettingsBackup: Codable {
         appVersion = try container.decodeIfPresent(String.self, forKey: .appVersion) ?? "1.0"
         includeAPIKeys = try container.decodeIfPresent(Bool.self, forKey: .includeAPIKeys) ?? false
         providers = try container.decodeIfPresent([LLMProvider].self, forKey: .providers) ?? []
+        defaultLLMProviderID = try container.decodeIfPresent(UUID.self, forKey: .defaultLLMProviderID)
+        defaultLLMModel = try container.decodeIfPresent(String.self, forKey: .defaultLLMModel) ?? ""
         knowledgeEmbeddingProviderID = try container.decodeIfPresent(UUID.self, forKey: .knowledgeEmbeddingProviderID)
         knowledgeEmbeddingModel = try container.decodeIfPresent(String.self, forKey: .knowledgeEmbeddingModel) ?? ""
         knowledgeEmbeddingAPIMode = try container.decodeIfPresent(KnowledgeEmbeddingAPIMode.self, forKey: .knowledgeEmbeddingAPIMode) ?? .openAIText
@@ -104,7 +113,7 @@ struct SettingsBackup: Codable {
         /// LLM 服务商列表
         ///
         /// LLM 服务商列表。
-        case providers, promptItems, imageProviders, videoProviders
+        case providers, defaultLLMProviderID, defaultLLMModel, promptItems, imageProviders, videoProviders
         case knowledgeEmbeddingProviderID, knowledgeEmbeddingModel, knowledgeEmbeddingAPIMode
         /// LLM Key 字典。
         case llmAPIKeys, imageAPIKeys, videoAPIKeys

@@ -520,13 +520,16 @@ final class WorkflowExecutor {
                   case .text(let knowledgePromptTemplate) = inputs["prompt"]?.first,
                   case .text(let instructions) = inputs["instructions"]?.first,
                   case .knowledgeCollection(let collectionReference) = inputs["collection"]?.first,
-                  let provider = settings.provider(id: node.configuration.providerID)
+                  let provider = settings.effectiveLLMProvider(for: node.configuration.providerID)
             else { throw WorkflowExecutionError.invalidValue("添加知识库节点需要图片文件夹、知识整理提示词、整理要求、知识集合和有效 LLM 服务商") }
             let targetCollectionID = UUID(uuidString: collectionReference)
             guard provider.supportsVision else {
                 throw WorkflowExecutionError.invalidValue("“\(provider.name)”未开启视觉能力，不能理解图片")
             }
-            let model = node.configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            let model = settings.effectiveLLMModel(
+                providerID: node.configuration.providerID,
+                model: node.configuration.model
+            )
             guard !model.isEmpty else { throw LLMError.missingModel }
             let apiKey = settings.apiKey(for: provider.id)
             guard !apiKey.isEmpty else { throw LLMError.missingAPIKey }
@@ -643,9 +646,12 @@ final class WorkflowExecutor {
 
         case .llm:
             guard case .text(let prompt) = inputs["prompt"]?.first,
-                  let provider = settings.provider(id: node.configuration.providerID)
+                  let provider = settings.effectiveLLMProvider(for: node.configuration.providerID)
             else { throw LLMError.missingProvider }
-            let model = node.configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            let model = settings.effectiveLLMModel(
+                providerID: node.configuration.providerID,
+                model: node.configuration.model
+            )
             guard !model.isEmpty else { throw LLMError.missingModel }
             let apiKey = settings.apiKey(for: provider.id)
             guard !apiKey.isEmpty else { throw LLMError.missingAPIKey }

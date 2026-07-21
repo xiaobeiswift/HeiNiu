@@ -48,6 +48,10 @@ final class SettingsStore {
     /// - SeeAlso: ``addProvider(_:)``, ``fetchModels(for:)``
     ///
     var providers: [LLMProvider] = []
+    /// 未单独绑定服务商时使用的全局默认 LLM 服务商。
+    var defaultLLMProviderID: UUID?
+    /// 未单独选择模型时使用的全局默认 LLM 模型 ID。
+    var defaultLLMModel: String = ""
     /// 知识库向量使用的 OpenAI 兼容服务商。
     var knowledgeEmbeddingProviderID: UUID?
     /// 知识库向量模型 ID。
@@ -94,6 +98,10 @@ final class SettingsStore {
     ///
     func addProvider(_ provider: LLMProvider) {
         providers.append(provider)
+        if defaultLLMProviderID == nil {
+            defaultLLMProviderID = provider.id
+            defaultLLMModel = provider.models.first ?? ""
+        }
         save()
     }
 
@@ -103,6 +111,10 @@ final class SettingsStore {
     func updateProvider(_ provider: LLMProvider) {
         guard let index = providers.firstIndex(where: { $0.id == provider.id }) else { return }
         providers[index] = provider
+        if defaultLLMProviderID == provider.id,
+           !provider.models.contains(defaultLLMModel) {
+            defaultLLMModel = provider.models.first ?? ""
+        }
         save()
     }
 
@@ -113,6 +125,10 @@ final class SettingsStore {
     ///
     func deleteProvider(id: UUID) {
         providers.removeAll { $0.id == id }
+        if defaultLLMProviderID == id {
+            defaultLLMProviderID = nil
+            defaultLLMModel = ""
+        }
         if knowledgeEmbeddingProviderID == id {
             knowledgeEmbeddingProviderID = nil
             knowledgeEmbeddingModel = ""
@@ -126,6 +142,32 @@ final class SettingsStore {
             promptItems[index].updatedAt = Date()
         }
         save()
+    }
+
+    /// 更新未单独绑定的提示词和工作流节点所继承的默认 LLM。
+    func setDefaultLLM(providerID: UUID?, model: String) {
+        guard let provider = provider(id: providerID) else {
+            defaultLLMProviderID = nil
+            defaultLLMModel = ""
+            save()
+            return
+        }
+        defaultLLMProviderID = provider.id
+        defaultLLMModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        save()
+    }
+
+    /// 解析节点或提示词的显式服务商；为空时回退到全局默认。
+    func effectiveLLMProvider(for providerID: UUID?) -> LLMProvider? {
+        provider(id: providerID ?? defaultLLMProviderID)
+    }
+
+    /// 解析节点或提示词的显式模型；仅在服务商也未显式指定时回退到全局默认。
+    func effectiveLLMModel(providerID: UUID?, model: String) -> String {
+        let clean = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clean.isEmpty { return clean }
+        guard providerID == nil else { return "" }
+        return defaultLLMModel.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 更新知识库嵌入服务配置。
@@ -324,7 +366,9 @@ final class SettingsStore {
     /// 执行 `updatePrompt` 相关逻辑。
     func updatePrompt(_ item: PromptItem) {
         guard let index = promptItems.firstIndex(where: { $0.id == item.id }) else { return }
+        guard !promptItems[index].isBuiltIn else { return }
         var updated = item
+        updated.isBuiltIn = false
         updated.updatedAt = Date()
         promptItems[index] = updated
         save()
@@ -334,6 +378,7 @@ final class SettingsStore {
     ///
     /// 执行 `deletePrompt` 相关逻辑。
     func deletePrompt(id: UUID) {
+        guard promptItems.first(where: { $0.id == id })?.isBuiltIn == false else { return }
         promptItems.removeAll { $0.id == id }
         save()
     }
@@ -361,6 +406,7 @@ final class SettingsStore {
     /// 执行 `resetPromptTemplate` 相关逻辑。
     func resetPromptTemplate(id: UUID) {
         guard let index = promptItems.firstIndex(where: { $0.id == id }) else { return }
+        guard !promptItems[index].isBuiltIn else { return }
         let item = promptItems[index]
         if let seed = DefaultPrompts.seedItems().first(where: {
             $0.category == item.category && $0.name == item.name
@@ -486,6 +532,8 @@ final class SettingsStore {
             let data = try Data(contentsOf: url)
             let persisted = try decoder.decode(PersistedSettings.self, from: data)
             providers = persisted.providers
+            defaultLLMProviderID = persisted.defaultLLMProviderID
+            defaultLLMModel = persisted.defaultLLMModel
             knowledgeEmbeddingProviderID = persisted.knowledgeEmbeddingProviderID
             knowledgeEmbeddingModel = persisted.knowledgeEmbeddingModel
             knowledgeEmbeddingAPIMode = persisted.knowledgeEmbeddingAPIMode
@@ -493,6 +541,10 @@ final class SettingsStore {
             imageProviders = persisted.imageProviders
             videoProviders = persisted.videoProviders
             var needsSave = false
+
+            if normalizeDefaultLLM() {
+                needsSave = true
+            }
 
             if promptItems.isEmpty {
                 if let migrated = persisted.migratedFromLegacyPrompts, !migrated.isEmpty {
@@ -503,7 +555,7 @@ final class SettingsStore {
                 needsSave = true
             }
 
-            // 补齐新增分类的预置提示词（如「物品」），不覆盖用户已有同名项
+            // 补齐新增分类的内置提示词（如「物品」），不覆盖用户已有同名项
             if seedMissingBuiltInPrompts() {
                 needsSave = true
             }
@@ -538,6 +590,8 @@ final class SettingsStore {
         AppPaths.ensureDirectories()
         let persisted = PersistedSettings(
             providers: providers,
+            defaultLLMProviderID: defaultLLMProviderID,
+            defaultLLMModel: defaultLLMModel,
             promptItems: promptItems,
             imageProviders: imageProviders,
             videoProviders: videoProviders,
@@ -571,6 +625,8 @@ final class SettingsStore {
         return SettingsBackup(
             includeAPIKeys: false,
             providers: providers,
+            defaultLLMProviderID: defaultLLMProviderID,
+            defaultLLMModel: defaultLLMModel,
             knowledgeEmbeddingProviderID: knowledgeEmbeddingProviderID,
             knowledgeEmbeddingModel: knowledgeEmbeddingModel,
             knowledgeEmbeddingAPIMode: knowledgeEmbeddingAPIMode,
@@ -608,6 +664,8 @@ final class SettingsStore {
     /// 替换模式会清理旧服务商钥匙串项。
     ///
     func importBackup(_ backup: SettingsBackup, mode: SettingsImportMode, importAPIKeys: Bool) {
+        let currentBuiltInPrompts = promptItems.filter(\.isBuiltIn)
+        let currentBuiltInKeys = Set(currentBuiltInPrompts.map { "\($0.category.rawValue)|\($0.name)" })
         switch mode {
         case .replace:
             // 清理旧 Key（避免孤儿钥匙串项）
@@ -622,10 +680,15 @@ final class SettingsStore {
             }
 
             providers = backup.providers
+            defaultLLMProviderID = backup.defaultLLMProviderID
+            defaultLLMModel = backup.defaultLLMModel
             knowledgeEmbeddingProviderID = backup.knowledgeEmbeddingProviderID
             knowledgeEmbeddingModel = backup.knowledgeEmbeddingModel
             knowledgeEmbeddingAPIMode = backup.knowledgeEmbeddingAPIMode
-            promptItems = backup.promptItems
+            // 内置提示词保留当前安装中的稳定 ID 与内容，不从备份覆盖。
+            promptItems = currentBuiltInPrompts + backup.promptItems.filter {
+                !$0.isBuiltIn && !currentBuiltInKeys.contains("\($0.category.rawValue)|\($0.name)")
+            }
             imageProviders = backup.imageProviders
             videoProviders = backup.videoProviders
 
@@ -635,6 +698,10 @@ final class SettingsStore {
 
         case .merge:
             mergeProviders(backup.providers, into: &providers)
+            if backup.defaultLLMProviderID != nil || !backup.defaultLLMModel.isEmpty {
+                defaultLLMProviderID = backup.defaultLLMProviderID
+                defaultLLMModel = backup.defaultLLMModel
+            }
             if backup.knowledgeEmbeddingProviderID != nil || !backup.knowledgeEmbeddingModel.isEmpty {
                 knowledgeEmbeddingProviderID = backup.knowledgeEmbeddingProviderID
                 knowledgeEmbeddingModel = backup.knowledgeEmbeddingModel
@@ -648,6 +715,7 @@ final class SettingsStore {
                 applyAPIKeys(from: backup)
             }
         }
+        _ = normalizeDefaultLLM()
         _ = seedMissingBuiltInPrompts()
         save()
     }
@@ -659,12 +727,39 @@ final class SettingsStore {
     /// 执行 `applyDefaults` 相关逻辑。
     private func applyDefaults() {
         providers = []
+        defaultLLMProviderID = nil
+        defaultLLMModel = ""
         knowledgeEmbeddingProviderID = nil
         knowledgeEmbeddingModel = ""
         knowledgeEmbeddingAPIMode = .openAIText
         promptItems = DefaultPrompts.seedItems()
         imageProviders = []
         videoProviders = []
+    }
+
+    /// 清理已删除的默认服务商，并规范模型 ID。
+    @discardableResult
+    private func normalizeDefaultLLM() -> Bool {
+        guard let providerID = defaultLLMProviderID else {
+            let changed = !defaultLLMModel.isEmpty
+            defaultLLMModel = ""
+            return changed
+        }
+        guard let provider = provider(id: providerID) else {
+            defaultLLMProviderID = nil
+            defaultLLMModel = ""
+            return true
+        }
+        let clean = defaultLLMModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean != defaultLLMModel {
+            defaultLLMModel = clean
+            return true
+        }
+        if clean.isEmpty, let first = provider.models.first {
+            defaultLLMModel = first
+            return true
+        }
+        return false
     }
 
     /// 返回是否写入了新项
@@ -760,8 +855,12 @@ final class SettingsStore {
     ///
     /// 执行 `mergePromptItems` 相关逻辑。
     private func mergePromptItems(_ incoming: [PromptItem]) {
-        for item in incoming {
+        // 内置提示词不参与导入；自定义条目也不能覆盖当前内置条目。
+        let builtInKeys = Set(promptItems.filter(\.isBuiltIn).map { "\($0.category.rawValue)|\($0.name)" })
+        for item in incoming where !item.isBuiltIn {
+            guard !builtInKeys.contains("\(item.category.rawValue)|\(item.name)") else { continue }
             if let index = promptItems.firstIndex(where: { $0.id == item.id }) {
+                guard !promptItems[index].isBuiltIn else { continue }
                 promptItems[index] = item
             } else {
                 promptItems.append(item)
@@ -950,6 +1049,8 @@ final class SettingsStore {
 private struct PersistedSettings: Codable {
     /// LLM 服务商列表。
     var providers: [LLMProvider]
+    var defaultLLMProviderID: UUID?
+    var defaultLLMModel: String
     var knowledgeEmbeddingProviderID: UUID?
     var knowledgeEmbeddingModel: String
     var knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode
@@ -969,6 +1070,8 @@ private struct PersistedSettings: Codable {
     /// 初始化方法。
     init(
         providers: [LLMProvider],
+        defaultLLMProviderID: UUID? = nil,
+        defaultLLMModel: String = "",
         promptItems: [PromptItem],
         imageProviders: [ImageProvider],
         videoProviders: [VideoProvider],
@@ -977,6 +1080,8 @@ private struct PersistedSettings: Codable {
         knowledgeEmbeddingAPIMode: KnowledgeEmbeddingAPIMode = .openAIText
     ) {
         self.providers = providers
+        self.defaultLLMProviderID = defaultLLMProviderID
+        self.defaultLLMModel = defaultLLMModel
         self.promptItems = promptItems
         self.imageProviders = imageProviders
         self.videoProviders = videoProviders
@@ -993,6 +1098,8 @@ private struct PersistedSettings: Codable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         providers = try container.decodeIfPresent([LLMProvider].self, forKey: .providers) ?? []
+        defaultLLMProviderID = try container.decodeIfPresent(UUID.self, forKey: .defaultLLMProviderID)
+        defaultLLMModel = try container.decodeIfPresent(String.self, forKey: .defaultLLMModel) ?? ""
         knowledgeEmbeddingProviderID = try container.decodeIfPresent(UUID.self, forKey: .knowledgeEmbeddingProviderID)
         knowledgeEmbeddingModel = try container.decodeIfPresent(String.self, forKey: .knowledgeEmbeddingModel) ?? ""
         knowledgeEmbeddingAPIMode = try container.decodeIfPresent(KnowledgeEmbeddingAPIMode.self, forKey: .knowledgeEmbeddingAPIMode) ?? .openAIText
@@ -1027,6 +1134,8 @@ private struct PersistedSettings: Codable {
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(providers, forKey: .providers)
+        try container.encodeIfPresent(defaultLLMProviderID, forKey: .defaultLLMProviderID)
+        try container.encode(defaultLLMModel, forKey: .defaultLLMModel)
         try container.encodeIfPresent(knowledgeEmbeddingProviderID, forKey: .knowledgeEmbeddingProviderID)
         try container.encode(knowledgeEmbeddingModel, forKey: .knowledgeEmbeddingModel)
         try container.encode(knowledgeEmbeddingAPIMode, forKey: .knowledgeEmbeddingAPIMode)
@@ -1042,7 +1151,7 @@ private struct PersistedSettings: Codable {
         /// LLM 服务商列表
         ///
         /// LLM 服务商列表。
-        case providers, promptItems, imageProviders, videoProviders, imageGen, prompts
+        case providers, defaultLLMProviderID, defaultLLMModel, promptItems, imageProviders, videoProviders, imageGen, prompts
         case knowledgeEmbeddingProviderID, knowledgeEmbeddingModel, knowledgeEmbeddingAPIMode
     }
 
