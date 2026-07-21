@@ -70,6 +70,15 @@ enum WorkflowValidator {
                 if node.configuration.parameterName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     issues.append(error("运行时输入的参数名称不能为空", node.id))
                 }
+                if node.configuration.runtimeInputType == .prompt {
+                    let resolved = resolvedRuntimePrompt(for: node, settings: settings)
+                    if resolved.template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        issues.append(error("提示词输入的默认值不能为空", node.id))
+                    }
+                    if resolved.usedSnapshot {
+                        issues.append(warning("“\(node.displayTitle)”的默认提示词不可用，将使用保存快照", node.id))
+                    }
+                }
             case .promptTemplate:
                 let template = resolvedTemplate(for: node, settings: settings).template
                 if template.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -85,6 +94,14 @@ enum WorkflowValidator {
                 if let providerID = settings.knowledgeEmbeddingProviderID,
                    settings.apiKey(for: providerID).isEmpty {
                     issues.append(error("知识检索使用的嵌入服务商还没有 API Key", node.id))
+                }
+            case .knowledgeImport:
+                validateLLM(node, settings: settings, issues: &issues)
+                if let provider = settings.provider(id: node.configuration.providerID), !provider.supportsVision {
+                    issues.append(error("“\(provider.name)”未开启视觉能力，不能用于图片知识入库", node.id))
+                }
+                if !(1...500).contains(node.configuration.maxFiles) {
+                    issues.append(error("单次处理图片数必须在 1 到 500 之间", node.id))
                 }
             case .llm:
                 validateLLM(node, settings: settings, issues: &issues)
@@ -184,6 +201,7 @@ enum WorkflowValidator {
             let count = multiplier[node.id] ?? 1
             switch node.kind {
             case .llm: result.llmCalls += count
+            case .knowledgeImport: result.llmCalls += count * max(1, min(500, node.configuration.maxFiles))
             case .imageGeneration: result.imageCalls += count
             case .videoGeneration: result.videoCalls += count
             default: break
@@ -197,6 +215,28 @@ enum WorkflowValidator {
         guard node.configuration.usesPromptLibrary else { return (node.configuration.text, false) }
         if let item = settings.promptItem(id: node.configuration.promptItemID) {
             return (item.template, false)
+        }
+        return (node.configuration.promptSnapshot, true)
+    }
+
+    /// 返回提示词类型运行输入的默认正文；未指定条目时跟随所选分类的第一条提示词。
+    static func resolvedRuntimePrompt(
+        for node: WorkflowNode,
+        settings: SettingsStore
+    ) -> (template: String, usedSnapshot: Bool) {
+        guard node.kind == .runtimeInput, node.configuration.runtimeInputType == .prompt else {
+            return (node.configuration.text, false)
+        }
+        if let item = settings.promptItem(id: node.configuration.promptItemID),
+           item.category == node.configuration.promptCategory {
+            return (item.template, false)
+        }
+        if node.configuration.promptItemID == nil {
+            let items = settings.prompts(in: node.configuration.promptCategory)
+            let preferred = node.configuration.promptCategory == .knowledgeImport
+                ? items.first(where: { $0.name == DefaultPrompts.knowledgeImportPromptName }) ?? items.first
+                : items.first
+            if let preferred { return (preferred.template, false) }
         }
         return (node.configuration.promptSnapshot, true)
     }
@@ -225,6 +265,7 @@ enum WorkflowValidator {
             issues.append(error("“\(node.displayTitle)”还没有选择模型", node.id))
         }
     }
+
 
     private static func validateImage(
         _ node: WorkflowNode,

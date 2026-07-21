@@ -591,9 +591,11 @@ private extension WorkflowValueType {
     var color: Color {
         switch self {
         case .text: .blue
+        case .knowledgeCollection: AppTheme.success
         case .image: .pink
         case .video: .cyan
         case .audio: .orange
+        case .folder: .green
         case .any: AppTheme.accent
         }
     }

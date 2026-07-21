@@ -82,8 +82,20 @@ enum ReasoningEffort: String, Codable, CaseIterable, Identifiable, Hashable {
     }
 }
 
-/// 发往模型的单条消息。
-///
+/// 发往视觉模型的一张内嵌图片。
+struct LLMImageAttachment: Hashable, Sendable {
+    /// 图片二进制数据。
+    var data: Data
+    /// IANA 媒体类型，例如 `image/jpeg`。
+    var mediaType: String
+
+    /// 可直接写入 OpenAI 兼容接口的 Data URL。
+    var dataURL: String {
+        "data:\(mediaType);base64,\(data.base64EncodedString())"
+    }
+}
+
+/// 发往模型的单条消息，可同时携带文本与内嵌图片。
 struct LLMChatMessage: Hashable, Sendable {
     /// Role
     ///
@@ -101,6 +113,8 @@ struct LLMChatMessage: Hashable, Sendable {
     var role: Role
     /// 消息正文。
     var content: String
+    /// 与正文一同发送的图片；纯文本调用保持为空。
+    var images: [LLMImageAttachment] = []
 }
 
 /// 一次补全结果：最终回答 + 可选思考过程。

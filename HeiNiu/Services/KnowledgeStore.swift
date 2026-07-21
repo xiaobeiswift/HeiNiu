@@ -110,6 +110,65 @@ final class KnowledgeStore {
         }
     }
 
+    /// 保存一张原始图片及其由视觉模型生成的知识正文。
+    ///
+    /// 图片会复制到 `KnowledgeBase/Files/<documentID>/`，数据库只记录相对路径。
+    /// 重复判断同时包含图片字节与生成正文，因此同图在不同整理要求下可以形成不同资料。
+    ///
+    /// - Returns: 新建资料，或已存在的相同资料。
+    func addGeneratedFile(
+        sourceURL: URL,
+        title: String,
+        content: String,
+        collectionID: UUID?,
+        tags: [String]
+    ) throws -> KnowledgeWriteResult {
+        guard let database else { throw KnowledgeDatabaseError.open("数据库不可用") }
+        var isDirectory: ObjCBool = false
+        guard sourceURL.isFileURL,
+              FileManager.default.fileExists(atPath: sourceURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              FileManager.default.isReadableFile(atPath: sourceURL.path)
+        else { throw LLMError.underlying("原始图片不可读：\(sourceURL.lastPathComponent)") }
+
+        let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanContent.isEmpty else { throw LLMError.underlying("模型生成的知识正文为空") }
+        let sourceData = try Data(contentsOf: sourceURL, options: .mappedIfSafe)
+        var checksumData = Data(cleanContent.utf8)
+        checksumData.append(0)
+        checksumData.append(sourceData)
+        let checksum = Self.sha256(checksumData)
+        if let existing = documents.first(where: { $0.sourceKind == .file && $0.checksum == checksum }) {
+            return KnowledgeWriteResult(documentID: existing.id, wasCreated: false)
+        }
+
+        let id = UUID()
+        let directory = AppPaths.knowledgeFilesRoot.appendingPathComponent(id.uuidString, isDirectory: true)
+        let target = directory.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: false)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.copyItem(at: sourceURL, to: target)
+            let item = KnowledgeDocument(
+                id: id,
+                title: normalizedTitle(title, fallback: sourceURL.deletingPathExtension().lastPathComponent),
+                collectionID: collectionID,
+                tags: normalizeTags(tags),
+                sourceKind: .file,
+                sourceFileName: sourceURL.lastPathComponent,
+                storedRelativePath: "Files/\(id.uuidString)/\(sourceURL.lastPathComponent)",
+                content: cleanContent,
+                checksum: checksum
+            )
+            try database.upsertDocument(item)
+            documents.insert(item, at: 0)
+            return KnowledgeWriteResult(documentID: id, wasCreated: true)
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            lastError = error.localizedDescription
+            throw error
+        }
+    }
+
     func updateDocument(id: UUID, title: String, content: String, collectionID: UUID?, tags: [String]) {
         guard let index = documents.firstIndex(where: { $0.id == id }), let database else { return }
         let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -504,7 +563,11 @@ final class KnowledgeStore {
     }
 
     nonisolated private static func sha256(_ text: String) -> String {
-        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+        sha256(Data(text.utf8))
+    }
+
+    nonisolated private static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     nonisolated private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Double {

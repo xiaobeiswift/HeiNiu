@@ -149,10 +149,59 @@ private struct WorkflowNodeConfigurationView: View {
                     }
                 }
                 Toggle("必填", isOn: $draft.configuration.isRequired)
-                if draft.configuration.runtimeInputType == .text {
+                if draft.configuration.runtimeInputType == .prompt {
+                    Picker("提示词分类", selection: $draft.configuration.promptCategory) {
+                        ForEach(PromptCategory.allCases) { category in
+                            Text(category.displayName).tag(category)
+                        }
+                    }
+                    .onChange(of: draft.configuration.promptCategory) { _, category in
+                        draft.configuration.promptItemID = nil
+                        if let item = settings.prompts(in: category).first {
+                            draft.configuration.promptSnapshot = item.template
+                        }
+                    }
+                    Picker("默认提示词", selection: $draft.configuration.promptItemID) {
+                        Text("按分类默认").tag(Optional<UUID>.none)
+                        ForEach(settings.prompts(in: draft.configuration.promptCategory)) { item in
+                            Text(item.name).tag(Optional(item.id))
+                        }
+                    }
+                    .onChange(of: draft.configuration.promptItemID) { _, id in
+                        if let item = settings.promptItem(id: id) {
+                            draft.configuration.promptSnapshot = item.template
+                        }
+                    }
+                    let resolved = WorkflowValidator.resolvedRuntimePrompt(for: draft, settings: settings)
+                    Text(resolved.template)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(AppTheme.textSecondary)
+                        .textSelection(.enabled)
+                        .lineLimit(8)
+                    if resolved.usedSnapshot {
+                        Label("默认提示词不可用，运行时将使用节点保存的快照。", systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.accent)
+                    }
+                    Text("运行工作流时可以为本次运行重新选择，不会修改这里的默认值。")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.textTertiary)
+                } else if draft.configuration.runtimeInputType == .knowledgeCollection {
+                    Picker("默认知识集合", selection: $draft.configuration.collectionID) {
+                        Text("未分类").tag(Optional<UUID>.none)
+                        ForEach(knowledge.collections) { collection in
+                            Text(collection.name).tag(Optional(collection.id))
+                        }
+                    }
+                    Text("运行工作流时可以为本次运行重新选择，所选集合会从节点输出端口传递。")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.textTertiary)
+                } else if draft.configuration.runtimeInputType == .text {
                     labeledEditor("默认值", text: $draft.configuration.text, minHeight: 100)
                 } else {
-                    Text("每次运行时使用原生文件选择器选择一个\(draft.configuration.runtimeInputType.title)文件。")
+                    Text(draft.configuration.runtimeInputType == .folder
+                         ? "每次运行时使用原生选择器选择一个文件夹。"
+                         : "每次运行时使用原生文件选择器选择一个\(draft.configuration.runtimeInputType.title)文件。")
                         .font(.caption)
                         .foregroundStyle(AppTheme.textTertiary)
                 }
@@ -200,6 +249,45 @@ private struct WorkflowNodeConfigurationView: View {
                     .textFieldStyle(.roundedBorder)
                 Stepper("返回 \(draft.configuration.topK) 个片段", value: $draft.configuration.topK, in: 1...20)
                 Text("检索使用设置页选定的嵌入服务商与模型。")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+
+        case .knowledgeImport:
+            inspectorSection("模型补充要求") {
+                labeledEditor("补充系统要求（可选）", text: $draft.configuration.systemPrompt, minHeight: 80)
+                Text("知识整理提示词必须通过左侧输入端口连接；节点配置只保存模型相关要求。")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+            inspectorSection("视觉模型") {
+                llmProviderPicker
+                modelPicker(models: selectedLLMProvider?.models ?? [])
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("温度 \(draft.configuration.temperature, specifier: "%.1f")").font(.caption)
+                    Slider(value: $draft.configuration.temperature, in: 0...2, step: 0.1)
+                }
+                Picker("推理强度", selection: $draft.configuration.reasoningEffort) {
+                    ForEach(ReasoningEffort.allCases) { effort in
+                        Text(reasoningTitle(effort)).tag(effort)
+                    }
+                }
+                if selectedLLMProvider?.supportsVision == false {
+                    Label("当前服务商未开启视觉能力", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.danger)
+                }
+            }
+            inspectorSection("入库规则") {
+                TextField("公共标签（逗号分隔）", text: tagsBinding)
+                    .textFieldStyle(.roundedBorder)
+                Text("知识集合必须通过左侧输入端口连接。模型返回的标签会与公共标签合并；原图会一并复制到知识库。")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+            inspectorSection("批处理") {
+                Stepper("最多处理 \(draft.configuration.maxFiles) 张", value: $draft.configuration.maxFiles, in: 1...500)
+                Text("每张图片调用一次视觉模型。已配置嵌入服务时会自动索引；否则资料保持等待索引。")
                     .font(.caption)
                     .foregroundStyle(AppTheme.textTertiary)
             }
@@ -295,7 +383,7 @@ private struct WorkflowNodeConfigurationView: View {
 
         case .output:
             inspectorSection("结果行为") {
-                Text("文本、图片、视频或音频由上游端口决定。运行后可在“运行”标签复制、预览、播放或打开。")
+                Text("文本、图片、视频、音频或文件夹由上游端口决定。运行后可在“运行”标签复制、预览、播放或打开。")
                     .font(.callout)
                     .foregroundStyle(AppTheme.textSecondary)
             }
@@ -675,6 +763,7 @@ private struct WorkflowNodeUsageView: View {
 
 private struct WorkflowRunInspectorView: View {
     @Environment(WorkflowStore.self) private var store
+    @Environment(KnowledgeStore.self) private var knowledge
 
     let workflow: WorkflowDefinition
     let node: WorkflowNode?
@@ -813,6 +902,16 @@ private struct WorkflowRunInspectorView: View {
                     NSPasteboard.general.setString(text, forType: .string)
                 }
                 .buttonStyle(.link)
+            case .knowledgeCollection(let raw):
+                if let id = UUID(uuidString: raw),
+                   let collection = knowledge.collections.first(where: { $0.id == id }) {
+                    Label(collection.name, systemImage: "books.vertical.fill")
+                } else if raw.isEmpty {
+                    Label("未分类", systemImage: "tray")
+                } else {
+                    Label("集合已不存在", systemImage: "books.vertical")
+                        .foregroundStyle(AppTheme.textTertiary)
+                }
             case .image:
                 if let url = store.artifactURL(for: value, run: run), let image = NSImage(contentsOf: url) {
                     Image(nsImage: image)
@@ -843,6 +942,14 @@ private struct WorkflowRunInspectorView: View {
                     artifactButtons(url)
                 } else {
                     Label("音频文件不存在", systemImage: "waveform.badge.exclamationmark")
+                        .foregroundStyle(AppTheme.danger)
+                }
+            case .folder:
+                if let url = store.artifactURL(for: value, run: run) {
+                    Label(url.lastPathComponent, systemImage: "folder.fill")
+                    artifactButtons(url)
+                } else {
+                    Label("文件夹不存在", systemImage: "folder.badge.questionmark")
                         .foregroundStyle(AppTheme.danger)
                 }
             }

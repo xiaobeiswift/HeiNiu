@@ -117,7 +117,7 @@ struct OpenAICompatibleClient: LLMClient {
         var payload: [String: Any] = [
             "model": model,
             "temperature": temperature,
-            "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
+            "messages": messages.map(Self.chatMessagePayload),
         ]
         if stream {
             payload["stream"] = true
@@ -157,7 +157,7 @@ struct OpenAICompatibleClient: LLMClient {
             "model": model,
             "temperature": temperature,
             "stream": true,
-            "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] },
+            "messages": messages.map(Self.chatMessagePayload),
         ]
         if let effort = reasoningEffort.apiValue {
             payload["reasoning_effort"] = effort
@@ -255,7 +255,7 @@ struct OpenAICompatibleClient: LLMClient {
             .joined(separator: "\n\n")
         let input = messages
             .filter { $0.role != .system }
-            .map { ["role": $0.role.rawValue, "content": $0.content] }
+            .map(Self.responsesMessagePayload)
 
         var payload: [String: Any] = [
             "model": model,
@@ -311,7 +311,7 @@ struct OpenAICompatibleClient: LLMClient {
             .joined(separator: "\n\n")
         let input = messages
             .filter { $0.role != .system }
-            .map { ["role": $0.role.rawValue, "content": $0.content] }
+            .map(Self.responsesMessagePayload)
 
         var payload: [String: Any] = [
             "model": model,
@@ -413,6 +413,36 @@ struct OpenAICompatibleClient: LLMClient {
     }
 
     // MARK: - Parsing helpers
+
+    /// 把统一消息转换为 Chat Completions 文本或多模态内容块。
+    static func chatMessagePayload(_ message: LLMChatMessage) -> [String: Any] {
+        guard !message.images.isEmpty else {
+            return ["role": message.role.rawValue, "content": message.content]
+        }
+        var content: [[String: Any]] = []
+        if !message.content.isEmpty {
+            content.append(["type": "text", "text": message.content])
+        }
+        content.append(contentsOf: message.images.map { image in
+            ["type": "image_url", "image_url": ["url": image.dataURL]]
+        })
+        return ["role": message.role.rawValue, "content": content]
+    }
+
+    /// 把统一消息转换为 Responses API 的 `input_text` / `input_image` 内容块。
+    static func responsesMessagePayload(_ message: LLMChatMessage) -> [String: Any] {
+        guard !message.images.isEmpty else {
+            return ["role": message.role.rawValue, "content": message.content]
+        }
+        var content: [[String: Any]] = []
+        if !message.content.isEmpty {
+            content.append(["type": "input_text", "text": message.content])
+        }
+        content.append(contentsOf: message.images.map { image in
+            ["type": "input_image", "image_url": image.dataURL]
+        })
+        return ["role": message.role.rawValue, "content": content]
+    }
 
     private static func parseChatCompletion(data: Data) throws -> LLMCompletion {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {

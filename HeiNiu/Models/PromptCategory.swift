@@ -24,6 +24,8 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
     case scene
     /// 物品 / 道具 / 产品。
     case item
+    /// 图片资料理解、提炼与知识库入库。
+    case knowledgeImport
 
     /// 稳定标识符（等于 `rawValue`）。
     var id: String { rawValue }
@@ -38,6 +40,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         case .character: "角色"
         case .scene: "场景"
         case .item: "物品"
+        case .knowledgeImport: "知识库添加"
         }
     }
 
@@ -51,6 +54,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         case .character: "person.2"
         case .scene: "building.2"
         case .item: "shippingbox"
+        case .knowledgeImport: "books.vertical.fill"
         }
     }
 
@@ -64,6 +68,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         case .character: "角色卡与外形描述"
         case .scene: "场景卡与氛围描述"
         case .item: "道具、产品与关键物件"
+        case .knowledgeImport: "图片理解、知识提炼与入库"
         }
     }
 
@@ -77,6 +82,7 @@ enum PromptCategory: String, Codable, CaseIterable, Identifiable, Hashable {
         case .character: ["script", "name", "traits"]
         case .scene: ["script", "location", "mood"]
         case .item: ["script", "name", "product", "details"]
+        case .knowledgeImport: ["filename", "requirements"]
         }
     }
 

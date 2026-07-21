@@ -10,6 +10,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
     case runtimeInput
     case promptTemplate
     case knowledgeSearch
+    case knowledgeImport
     case llm
     case imageGeneration
     case videoGeneration
@@ -20,7 +21,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
 
     /// 节点目录中的稳定顺序。
     static let catalog: [WorkflowNodeKind] = [
-        .runtimeInput, .promptTemplate, .knowledgeSearch, .llm,
+        .runtimeInput, .promptTemplate, .knowledgeSearch, .knowledgeImport, .llm,
         .imageGeneration, .videoGeneration, .condition, .loop, .output,
     ]
 
@@ -30,6 +31,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
         case .runtimeInput: "runtimeInput"
         case .promptTemplate: "promptTemplate"
         case .knowledgeSearch: "knowledgeSearch"
+        case .knowledgeImport: "knowledgeImport"
         case .llm: "llm"
         case .imageGeneration: "imageGeneration"
         case .videoGeneration: "videoGeneration"
@@ -46,6 +48,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
         case "runtimeInput": self = .runtimeInput
         case "promptTemplate": self = .promptTemplate
         case "knowledgeSearch": self = .knowledgeSearch
+        case "knowledgeImport": self = .knowledgeImport
         case "llm": self = .llm
         case "imageGeneration": self = .imageGeneration
         case "videoGeneration": self = .videoGeneration
@@ -65,18 +68,22 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
 /// 工作流端口传递的数据类型。
 enum WorkflowValueType: String, Codable, Hashable {
     case text
+    case knowledgeCollection
     case image
     case video
     case audio
+    case folder
     case any
 
     /// 中文显示名称。
     var title: String {
         switch self {
         case .text: "文本"
+        case .knowledgeCollection: "知识集合"
         case .image: "图片"
         case .video: "视频"
         case .audio: "音频"
+        case .folder: "文件夹"
         case .any: "任意结果"
         }
     }
@@ -141,6 +148,14 @@ struct WorkflowNodeDescriptor: Identifiable, Hashable {
             return [
                 Self.input("query", "查询", .text, true, "用于向量检索的查询文本。"),
                 Self.output("context", "检索结果", .text, "按相似度整理的资料片段与来源。"),
+            ]
+        case .knowledgeImport:
+            return [
+                Self.input("folder", "图片文件夹", .folder, true, "本次运行选择的图片文件夹；会递归处理其中支持的图片。"),
+                Self.input("prompt", "知识整理提示词", .text, true, "用于逐张理解图片、生成标题、正文和标签的提示词模板。"),
+                Self.input("instructions", "整理要求", .text, true, "告诉视觉模型需要识别、提炼和保存哪些知识。"),
+                Self.input("collection", "知识集合", .knowledgeCollection, true, "本次生成的知识资料写入哪个集合；空引用表示未分类。"),
+                Self.output("summary", "入库摘要", .text, "成功、重复、索引和失败数量，以及逐文件错误。"),
             ]
         case .llm:
             return [
@@ -218,27 +233,35 @@ struct WorkflowNodeDescriptor: Identifiable, Hashable {
 /// 运行前输入节点接受的值类型。
 enum WorkflowRuntimeInputType: String, Codable, CaseIterable, Identifiable, Hashable, Sendable {
     case text
+    case prompt
+    case knowledgeCollection
     case image
     case video
     case audio
+    case folder
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .text: "文本"
+        case .prompt: "提示词"
+        case .knowledgeCollection: "知识集合"
         case .image: "图片"
         case .video: "视频"
         case .audio: "音频"
+        case .folder: "文件夹"
         }
     }
 
     var valueType: WorkflowValueType {
         switch self {
-        case .text: .text
+        case .text, .prompt: .text
+        case .knowledgeCollection: .knowledgeCollection
         case .image: .image
         case .video: .video
         case .audio: .audio
+        case .folder: .folder
         }
     }
 
@@ -290,15 +313,15 @@ enum WorkflowNodeCatalog {
             WorkflowNodeDescriptor(
                 kind: .runtimeInput,
                 title: "运行时输入",
-                summary: "每次运行前填写一个可复用文本参数",
-                systemImage: "text.cursor",
+                summary: "每次运行前填写文本、选择提示词或选择文件",
+                systemImage: "tray.and.arrow.down",
                 tint: .blue,
                 usage: NodeUsageGuide(
-                    purpose: "把简报、主题、剧本文本等变化内容作为工作流入口。节点保存参数名称和默认值，实际值在运行前填写，不会改动模板。",
-                    setupSteps: ["填写清楚的参数名称。", "按需设置默认值和必填状态。", "运行工作流时在参数表中填写本次内容。"],
-                    connectionExample: "运行时输入「创作简报」 → 提示词模板 {{brief}}",
-                    resultDescription: "输出本次运行填写的纯文本。",
-                    commonErrors: ["必填参数为空时无法开始运行。", "多个输入节点名称相同会难以辨认，建议使用唯一名称。"],
+                    purpose: "把简报、提示词、媒体文件或文件夹等变化内容作为工作流入口。节点保存参数名称、类型和默认值，实际值在运行前提供，不会改动模板。",
+                    setupSteps: ["填写清楚的参数名称。", "选择文本、提示词、知识集合、图片、视频、音频或文件夹类型。", "按需设置默认值和必填状态。", "运行工作流时填写文本、选择提示词、知识集合或本次文件。"],
+                    connectionExample: "文本输入「创作简报」 → 提示词模板；提示词、知识集合与文件夹输入 → 添加知识库",
+                    resultDescription: "输出本次运行提供的类型化参数；文件和文件夹会先复制到本次运行目录。",
+                    commonErrors: ["必填参数为空时无法开始运行。", "文件或文件夹不可读。", "多个输入节点名称相同会难以辨认，建议使用唯一名称。"],
                     warnings: []
                 )
             ),
@@ -330,6 +353,21 @@ enum WorkflowNodeCatalog {
                     resultDescription: "按相似度输出 [资料标题#片段序号]、正文和分数。",
                     commonErrors: ["未配置嵌入模型或 API Key。", "筛选范围内没有已完成索引的资料。", "查询向量与现有索引指纹不一致。"],
                     warnings: ["检索会调用嵌入接口，可能产生少量费用。"]
+                )
+            ),
+            WorkflowNodeDescriptor(
+                kind: .knowledgeImport,
+                title: "添加知识库",
+                summary: "让视觉模型整理文件夹图片并写入知识库",
+                systemImage: "books.vertical.fill",
+                tint: .green,
+                usage: NodeUsageGuide(
+                    purpose: "递归读取文件夹内的图片，逐张调用支持视觉的 LLM，按上游提示词与整理要求生成标题、正文和标签，并把原图与生成内容一起保存到全局知识库。",
+                    setupSteps: ["选择支持视觉的 LLM 服务商和模型。", "设置公共标签与单次最多处理的图片数。", "连接文件夹、知识整理提示词、整理要求与知识集合后运行。"],
+                    connectionExample: "运行时输入「图片文件夹」+「知识整理提示词」+「整理要求」+「知识集合」 → 添加知识库 → 结果输出",
+                    resultDescription: "每张成功图片成为一条知识资料并保留原图；若已配置嵌入服务则自动建立向量索引，最后输出批处理摘要。",
+                    commonErrors: ["所选服务商未开启视觉能力。", "文件夹内没有支持的图片。", "模型、API Key 或网络不可用。", "模型返回内容为空。"],
+                    warnings: ["每张图片会产生一次视觉模型请求；请用单次上限控制费用。", "同一图片和生成内容重复运行时会跳过重复资料。"]
                 )
             ),
             WorkflowNodeDescriptor(
@@ -414,10 +452,10 @@ enum WorkflowNodeCatalog {
                 systemImage: "square.and.arrow.down",
                 tint: .gray,
                 usage: NodeUsageGuide(
-                    purpose: "作为工作流终点，接收文本、图片、视频或音频并在运行检查器中展示。",
+                    purpose: "作为工作流终点，接收文本、图片、视频、音频或文件夹并在运行检查器中展示。",
                     setupSteps: ["连接需要保留的最终结果。", "运行后在运行标签或历史记录中打开结果。"],
                     connectionExample: "LLM / 生图 / 生视频 / 循环完成 → 结果输出",
-                    resultDescription: "文本可复制；图片可预览；视频和音频可播放；媒体可在 Finder 中定位。",
+                    resultDescription: "文本可复制；图片可预览；视频和音频可播放；媒体与文件夹可打开或在 Finder 中定位。",
                     commonErrors: ["没有连接任何上游结果。", "上游分支未命中时本节点会被跳过。"],
                     warnings: []
                 )
@@ -511,6 +549,8 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
     var parameterName: String = "输入"
     var isRequired: Bool = true
     var runtimeInputType: WorkflowRuntimeInputType = .text
+    /// 提示词类型运行输入在运行时可选择的提示词库分类。
+    var promptCategory: PromptCategory = .script
     var usesPromptLibrary: Bool = false
     var promptItemID: UUID?
     var promptSnapshot: String = ""
@@ -522,6 +562,8 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
     var collectionID: UUID?
     var tags: [String] = []
     var topK: Int = 5
+    /// “添加知识库”节点单次最多处理的图片数量。
+    var maxFiles: Int = 50
     var comparison: WorkflowComparison = .contains
     var comparisonValue: String = ""
     var maxIterations: Int = 3
@@ -554,6 +596,7 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
         parameterName = try container.decodeIfPresent(String.self, forKey: .parameterName) ?? "输入"
         isRequired = try container.decodeIfPresent(Bool.self, forKey: .isRequired) ?? true
         runtimeInputType = (try? container.decodeIfPresent(WorkflowRuntimeInputType.self, forKey: .runtimeInputType)) ?? .text
+        promptCategory = (try? container.decodeIfPresent(PromptCategory.self, forKey: .promptCategory)) ?? .script
         usesPromptLibrary = try container.decodeIfPresent(Bool.self, forKey: .usesPromptLibrary) ?? false
         promptItemID = try container.decodeIfPresent(UUID.self, forKey: .promptItemID)
         promptSnapshot = try container.decodeIfPresent(String.self, forKey: .promptSnapshot) ?? ""
@@ -565,6 +608,7 @@ struct WorkflowNodeConfiguration: Codable, Hashable {
         collectionID = try container.decodeIfPresent(UUID.self, forKey: .collectionID)
         tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
         topK = min(20, max(1, try container.decodeIfPresent(Int.self, forKey: .topK) ?? 5))
+        maxFiles = min(500, max(1, try container.decodeIfPresent(Int.self, forKey: .maxFiles) ?? 50))
         comparison = (try? container.decodeIfPresent(WorkflowComparison.self, forKey: .comparison)) ?? .contains
         comparisonValue = try container.decodeIfPresent(String.self, forKey: .comparisonValue) ?? ""
         maxIterations = min(20, max(1, try container.decodeIfPresent(Int.self, forKey: .maxIterations) ?? 3))
@@ -682,7 +726,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
     var createdAt: Date
     var updatedAt: Date
 
-    static let currentFormatVersion = 2
+    static let currentFormatVersion = 3
 
     init(
         id: UUID = UUID(),
@@ -736,27 +780,101 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
             ]
         )
     }
+
+    /// 内置“添加知识库”工作流的稳定 ID，用于为已有安装补齐模板并避免重复创建。
+    static let knowledgeImportWorkflowID = UUID(uuidString: "ADD0A11B-0000-4B00-8000-000000000001")!
+
+    /// 创建内置的图片文件夹知识入库工作流。
+    static func knowledgeImport() -> WorkflowDefinition {
+        var folderConfiguration = WorkflowNodeConfiguration()
+        folderConfiguration.parameterName = "图片文件夹"
+        folderConfiguration.runtimeInputType = .folder
+
+        var instructionsConfiguration = WorkflowNodeConfiguration()
+        instructionsConfiguration.parameterName = "整理要求"
+        instructionsConfiguration.text = "请识别图片中的主体、场景、风格、关键细节和可复用知识，使用准确、便于检索的中文整理。"
+
+        var promptConfiguration = WorkflowNodeConfiguration()
+        promptConfiguration.parameterName = "知识整理提示词"
+        promptConfiguration.runtimeInputType = .prompt
+        promptConfiguration.promptCategory = .knowledgeImport
+        promptConfiguration.promptSnapshot = DefaultPrompts.knowledgeImportPromptTemplate
+
+        var collectionConfiguration = WorkflowNodeConfiguration()
+        collectionConfiguration.parameterName = "知识集合"
+        collectionConfiguration.runtimeInputType = .knowledgeCollection
+        collectionConfiguration.isRequired = false
+
+        var importConfiguration = WorkflowNodeConfiguration()
+        importConfiguration.title = "LLM 图片知识入库"
+        importConfiguration.temperature = 0.2
+        importConfiguration.maxFiles = 50
+
+        let folder = WorkflowNode(
+            kind: .runtimeInput,
+            position: WorkflowPoint(x: 60, y: 100),
+            configuration: folderConfiguration
+        )
+        let instructions = WorkflowNode(
+            kind: .runtimeInput,
+            position: WorkflowPoint(x: 60, y: 320),
+            configuration: instructionsConfiguration
+        )
+        let prompt = WorkflowNode(
+            kind: .runtimeInput,
+            position: WorkflowPoint(x: 60, y: 540),
+            configuration: promptConfiguration
+        )
+        let collection = WorkflowNode(
+            kind: .runtimeInput,
+            position: WorkflowPoint(x: 60, y: 760),
+            configuration: collectionConfiguration
+        )
+        let knowledgeImport = WorkflowNode(
+            kind: .knowledgeImport,
+            position: WorkflowPoint(x: 430, y: 390),
+            configuration: importConfiguration
+        )
+        let output = WorkflowNode(kind: .output, position: WorkflowPoint(x: 790, y: 390))
+
+        return WorkflowDefinition(
+            id: knowledgeImportWorkflowID,
+            name: "添加知识库",
+            nodes: [folder, instructions, prompt, collection, knowledgeImport, output],
+            connections: [
+                WorkflowConnection(sourceNodeID: folder.id, sourcePortID: "folder", targetNodeID: knowledgeImport.id, targetPortID: "folder"),
+                WorkflowConnection(sourceNodeID: instructions.id, sourcePortID: "text", targetNodeID: knowledgeImport.id, targetPortID: "instructions"),
+                WorkflowConnection(sourceNodeID: prompt.id, sourcePortID: "prompt", targetNodeID: knowledgeImport.id, targetPortID: "prompt"),
+                WorkflowConnection(sourceNodeID: collection.id, sourcePortID: "knowledgeCollection", targetNodeID: knowledgeImport.id, targetPortID: "collection"),
+                WorkflowConnection(sourceNodeID: knowledgeImport.id, sourcePortID: "summary", targetNodeID: output.id, targetPortID: "value"),
+            ]
+        )
+    }
 }
 
 /// 节点端口在一次运行中传递的值。
 enum WorkflowValue: Codable, Hashable, Sendable {
     case text(String)
+    case knowledgeCollection(String)
     case image(String)
     case video(String)
     case audio(String)
+    case folder(String)
 
     var valueType: WorkflowValueType {
         switch self {
         case .text: .text
+        case .knowledgeCollection: .knowledgeCollection
         case .image: .image
         case .video: .video
         case .audio: .audio
+        case .folder: .folder
         }
     }
 
     var payload: String {
         switch self {
-        case .text(let value), .image(let value), .video(let value), .audio(let value): value
+        case .text(let value), .knowledgeCollection(let value), .image(let value), .video(let value), .audio(let value), .folder(let value): value
         }
     }
 
@@ -767,9 +885,11 @@ enum WorkflowValue: Codable, Hashable, Sendable {
         let type = try container.decodeIfPresent(String.self, forKey: .type) ?? "text"
         let value = try container.decodeIfPresent(String.self, forKey: .value) ?? ""
         switch type {
+        case "knowledgeCollection": self = .knowledgeCollection(value)
         case "image": self = .image(value)
         case "video": self = .video(value)
         case "audio": self = .audio(value)
+        case "folder": self = .folder(value)
         default: self = .text(value)
         }
     }
@@ -867,7 +987,7 @@ struct WorkflowRun: Identifiable, Codable, Hashable, Sendable {
     var startedAt: Date
     var endedAt: Date?
 
-    static let currentFormatVersion = 2
+    static let currentFormatVersion = 3
 
     init(
         id: UUID = UUID(),

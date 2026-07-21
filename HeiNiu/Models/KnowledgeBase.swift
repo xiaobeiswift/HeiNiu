@@ -149,6 +149,14 @@ nonisolated struct KnowledgeImportSummary: Sendable {
     var failures: [String] = []
 }
 
+/// 工作流写入一条模型生成资料后的结果。
+nonisolated struct KnowledgeWriteResult: Hashable, Sendable {
+    /// 新建或已存在的资料 ID。
+    var documentID: UUID
+    /// `true` 表示本次新建；`false` 表示命中相同图片与内容的重复资料。
+    var wasCreated: Bool
+}
+
 /// 知识库归档导入模式。
 nonisolated enum KnowledgeArchiveImportMode: String, CaseIterable, Identifiable {
     case merge

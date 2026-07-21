@@ -110,7 +110,7 @@ struct PromptsSettingsView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("提示词库")
                     .font(.title3.weight(.semibold))
-                Text("按创作环节管理多条提示词；生图/生视频的文案也在这里配置")
+                Text("按创作环节管理多条提示词；生图、生视频和知识库添加的文案也在这里配置")
                     .font(.callout)
                     .foregroundStyle(AppTheme.textSecondary)
             }
@@ -129,46 +129,45 @@ struct PromptsSettingsView: View {
 
     /// categoryChips。
     private var categoryChips: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(PromptCategory.allCases) { category in
-                    let selected = selectedCategory == category
-                    let count = settings.count(in: category)
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            selectedCategory = category
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: category.systemImage)
-                                .font(.caption)
-                            Text(category.displayName)
-                                .font(.subheadline.weight(selected ? .semibold : .regular))
-                            Text("\(count)")
-                                .font(.caption2.monospacedDigit().weight(.semibold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(
-                                    Capsule().fill(selected ? AppTheme.accent.opacity(0.22) : AppTheme.bgElevated)
-                                )
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .foregroundStyle(selected ? AppTheme.accent : AppTheme.textSecondary)
-                        .background(
-                            Capsule().fill(selected ? AppTheme.accentSoft : AppTheme.bgElevated)
-                        )
-                        .overlay(
-                            Capsule().stroke(
-                                selected ? AppTheme.accent.opacity(0.35) : AppTheme.stroke,
-                                lineWidth: 1
-                            )
-                        )
+        FlowLayout(spacing: 8) {
+            ForEach(PromptCategory.allCases) { category in
+                let selected = selectedCategory == category
+                let count = settings.count(in: category)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        selectedCategory = category
                     }
-                    .buttonStyle(.plain)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: category.systemImage)
+                            .font(.caption)
+                        Text(category.displayName)
+                            .font(.subheadline.weight(selected ? .semibold : .regular))
+                        Text("\(count)")
+                            .font(.caption2.monospacedDigit().weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule().fill(selected ? AppTheme.accent.opacity(0.22) : AppTheme.bgElevated)
+                            )
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .foregroundStyle(selected ? AppTheme.accent : AppTheme.textSecondary)
+                    .background(
+                        Capsule().fill(selected ? AppTheme.accentSoft : AppTheme.bgElevated)
+                    )
+                    .overlay(
+                        Capsule().stroke(
+                            selected ? AppTheme.accent.opacity(0.35) : AppTheme.stroke,
+                            lineWidth: 1
+                        )
+                    )
                 }
+                .buttonStyle(.plain)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// promptList。

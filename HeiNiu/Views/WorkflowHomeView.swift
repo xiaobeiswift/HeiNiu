@@ -378,12 +378,14 @@ private struct WorkflowRunRequest: Identifiable {
 private struct WorkflowRunPreflightSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(SettingsStore.self) private var settings
+    @Environment(KnowledgeStore.self) private var knowledge
 
     let workflow: WorkflowDefinition
     let targetNodeID: UUID?
     let onRun: ([String: WorkflowValue]) -> Void
 
     @State private var values: [String: WorkflowValue]
+    @State private var promptSelections: [UUID: UUID] = [:]
 
     init(
         workflow: WorkflowDefinition,
@@ -397,8 +399,17 @@ private struct WorkflowRunPreflightSheet: View {
         let ids = targetNodeID == nil ? Set(workflow.nodes.map(\.id)) : relevant
         _values = State(initialValue: Dictionary(uniqueKeysWithValues: workflow.nodes.compactMap { node in
             guard ids.contains(node.id), node.kind == .runtimeInput else { return nil }
-            guard node.configuration.runtimeInputType == .text else { return nil }
-            return (node.id.uuidString, WorkflowValue.text(node.configuration.text))
+            switch node.configuration.runtimeInputType {
+            case .text:
+                return (node.id.uuidString, WorkflowValue.text(node.configuration.text))
+            case .knowledgeCollection:
+                return (
+                    node.id.uuidString,
+                    WorkflowValue.knowledgeCollection(node.configuration.collectionID?.uuidString ?? "")
+                )
+            case .prompt, .image, .video, .audio, .folder:
+                return nil
+            }
         }))
     }
 
@@ -425,7 +436,7 @@ private struct WorkflowRunPreflightSheet: View {
     private var hasBlockingError: Bool {
         issues.contains { $0.severity == .error } || inputNodes.contains { node in
             node.configuration.isRequired &&
-            (values[node.id.uuidString]?.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            (runtimeValue(for: node)?.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         }
     }
 
@@ -440,7 +451,7 @@ private struct WorkflowRunPreflightSheet: View {
                 Spacer()
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("开始运行") {
-                    onRun(values)
+                    onRun(valuesWithPromptInputs())
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -464,7 +475,34 @@ private struct WorkflowRunPreflightSheet: View {
                                             Text("必填").font(.caption2).foregroundStyle(AppTheme.danger)
                                         }
                                     }
-                                    if node.configuration.runtimeInputType == .text {
+                                    if node.configuration.runtimeInputType == .prompt {
+                                        Picker("提示词", selection: promptSelectionBinding(for: node.id)) {
+                                            Text(defaultPromptLabel(for: node)).tag(Optional<UUID>.none)
+                                            ForEach(settings.prompts(in: node.configuration.promptCategory)) { item in
+                                                Text(item.name).tag(Optional(item.id))
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        Text(promptPreview(for: node))
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(AppTheme.textSecondary)
+                                            .lineLimit(5)
+                                            .textSelection(.enabled)
+                                        Text("本次选择从这个输入节点输出，不会修改节点默认值。")
+                                            .font(.caption)
+                                            .foregroundStyle(AppTheme.textTertiary)
+                                    } else if node.configuration.runtimeInputType == .knowledgeCollection {
+                                        Picker("知识集合", selection: collectionSelectionBinding(for: node.id)) {
+                                            Text("未分类").tag(Optional<UUID>.none)
+                                            ForEach(knowledge.collections) { collection in
+                                                Text(collection.name).tag(Optional(collection.id))
+                                            }
+                                        }
+                                        .pickerStyle(.menu)
+                                        Text("本次选择从这个输入节点输出，不会修改节点默认值。")
+                                            .font(.caption)
+                                            .foregroundStyle(AppTheme.textTertiary)
+                                    } else if node.configuration.runtimeInputType == .text {
                                         TextEditor(text: Binding(
                                             get: {
                                                 guard case .text(let text) = values[node.id.uuidString] else { return "" }
@@ -481,18 +519,22 @@ private struct WorkflowRunPreflightSheet: View {
                                         HStack {
                                             Image(systemName: mediaIcon(node.configuration.runtimeInputType))
                                                 .foregroundStyle(AppTheme.accent)
-                                            Text(selectedFilename(node.id))
+                                            Text(selectedItemName(node))
                                                 .foregroundStyle(values[node.id.uuidString] == nil ? AppTheme.textTertiary : AppTheme.textPrimary)
                                                 .lineLimit(1)
                                             Spacer()
-                                            Button(values[node.id.uuidString] == nil ? "选择文件" : "重新选择") {
+                                            Button(values[node.id.uuidString] == nil
+                                                   ? (node.configuration.runtimeInputType == .folder ? "选择文件夹" : "选择文件")
+                                                   : "重新选择") {
                                                 chooseMedia(for: node)
                                             }
                                         }
                                         .padding(10)
                                         .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 7))
                                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(AppTheme.stroke))
-                                        Text("文件会复制到本次运行的 Assets；运行记录不会保存原始绝对路径。")
+                                        Text(node.configuration.runtimeInputType == .folder
+                                             ? "文件夹会复制到本次运行的 Assets；运行记录不会保存原始绝对路径。"
+                                             : "文件会复制到本次运行的 Assets；运行记录不会保存原始绝对路径。")
                                             .font(.caption)
                                             .foregroundStyle(AppTheme.textTertiary)
                                     }
@@ -539,27 +581,99 @@ private struct WorkflowRunPreflightSheet: View {
         .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 8))
     }
 
-    private func selectedFilename(_ nodeID: UUID) -> String {
-        guard let value = values[nodeID.uuidString] else { return "尚未选择文件" }
+    private func promptSelectionBinding(for nodeID: UUID) -> Binding<UUID?> {
+        Binding(
+            get: { promptSelections[nodeID] },
+            set: { selection in
+                if let selection {
+                    promptSelections[nodeID] = selection
+                } else {
+                    promptSelections.removeValue(forKey: nodeID)
+                }
+            }
+        )
+    }
+
+    private func collectionSelectionBinding(for nodeID: UUID) -> Binding<UUID?> {
+        Binding(
+            get: {
+                guard case .knowledgeCollection(let raw) = values[nodeID.uuidString] else { return nil }
+                return UUID(uuidString: raw)
+            },
+            set: { selection in
+                values[nodeID.uuidString] = .knowledgeCollection(selection?.uuidString ?? "")
+            }
+        )
+    }
+
+    private func defaultPromptLabel(for node: WorkflowNode) -> String {
+        if let item = settings.promptItem(id: node.configuration.promptItemID) {
+            return "使用节点默认 · \(item.name)"
+        }
+        if node.configuration.promptItemID == nil {
+            let items = settings.prompts(in: node.configuration.promptCategory)
+            let preferred = node.configuration.promptCategory == .knowledgeImport
+                ? items.first(where: { $0.name == DefaultPrompts.knowledgeImportPromptName }) ?? items.first
+                : items.first
+            if let preferred { return "使用节点默认 · \(preferred.name)" }
+        }
+        return "使用节点保存的提示词快照"
+    }
+
+    private func promptPreview(for node: WorkflowNode) -> String {
+        if let itemID = promptSelections[node.id], let item = settings.promptItem(id: itemID) {
+            return item.template
+        }
+        return WorkflowValidator.resolvedRuntimePrompt(for: node, settings: settings).template
+    }
+
+    private func valuesWithPromptInputs() -> [String: WorkflowValue] {
+        var result = values
+        for node in inputNodes where node.configuration.runtimeInputType == .prompt {
+            if let value = runtimeValue(for: node) {
+                result[node.id.uuidString] = value
+            }
+        }
+        return result
+    }
+
+    private func runtimeValue(for node: WorkflowNode) -> WorkflowValue? {
+        if node.configuration.runtimeInputType == .prompt {
+            if let itemID = promptSelections[node.id], let item = settings.promptItem(id: itemID) {
+                return .text(item.template)
+            }
+            return .text(WorkflowValidator.resolvedRuntimePrompt(for: node, settings: settings).template)
+        }
+        return values[node.id.uuidString]
+    }
+
+    private func selectedItemName(_ node: WorkflowNode) -> String {
+        guard let value = values[node.id.uuidString] else {
+            return node.configuration.runtimeInputType == .folder ? "尚未选择文件夹" : "尚未选择文件"
+        }
         return URL(fileURLWithPath: value.payload).lastPathComponent
     }
 
     private func mediaIcon(_ type: WorkflowRuntimeInputType) -> String {
         switch type {
         case .text: "text.cursor"
+        case .prompt: "text.quote"
+        case .knowledgeCollection: "books.vertical"
         case .image: "photo"
         case .video: "video"
         case .audio: "waveform"
+        case .folder: "folder"
         }
     }
 
     private func chooseMedia(for node: WorkflowNode) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
+        let choosesFolder = node.configuration.runtimeInputType == .folder
+        panel.canChooseDirectories = choosesFolder
+        panel.canChooseFiles = !choosesFolder
         switch node.configuration.runtimeInputType {
-        case .text:
+        case .text, .prompt, .knowledgeCollection:
             return
         case .image:
             panel.allowedContentTypes = [.image]
@@ -567,13 +681,16 @@ private struct WorkflowRunPreflightSheet: View {
             panel.allowedContentTypes = [.movie, .mpeg4Movie, .quickTimeMovie]
         case .audio:
             panel.allowedContentTypes = [.audio]
+        case .folder:
+            break
         }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         switch node.configuration.runtimeInputType {
-        case .text: break
+        case .text, .prompt, .knowledgeCollection: break
         case .image: values[node.id.uuidString] = .image(url.path)
         case .video: values[node.id.uuidString] = .video(url.path)
         case .audio: values[node.id.uuidString] = .audio(url.path)
+        case .folder: values[node.id.uuidString] = .folder(url.path)
         }
     }
 }

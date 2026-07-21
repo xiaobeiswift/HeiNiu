@@ -9,6 +9,23 @@ import Foundation
 ///
 /// `DefaultPrompts` 类型定义。
 enum DefaultPrompts {
+    /// 内置图片知识整理提示词的名称，用于“添加知识库”节点按分类跟随最新设置。
+    static let knowledgeImportPromptName = "图片知识整理"
+
+    /// 内置图片知识整理提示词正文；文件名和本次要求由入库节点逐图替换。
+    static let knowledgeImportPromptTemplate = """
+    你是一位知识库资料整理助手。请根据图片内容，整理一条准确、完整、便于检索和复用的中文知识资料。
+
+    文件名：
+    {{filename}}
+
+    本次整理要求：
+    {{requirements}}
+
+    重点提取图片中的主体或人物、场景、视觉风格、关键细节和可复用信息。
+    只记录图片能够确认的事实，不要编造；标题简洁明确，正文应能脱离原图独立理解，并附上简短中文标签。
+    """
+
     /// 首次启动预置的多条提示词（按创作环节分组）
     static func seedItems() -> [PromptItem] {
         var items: [PromptItem] = []
@@ -272,6 +289,9 @@ enum DefaultPrompts {
 
         输出：形体、材质、颜色、Logo/细节、光泽、适合的展示角度与光线关键词（中英可混）。
         """)
+
+        // MARK: 知识库添加
+        add(.knowledgeImport, knowledgeImportPromptName, knowledgeImportPromptTemplate)
 
         return items
     }

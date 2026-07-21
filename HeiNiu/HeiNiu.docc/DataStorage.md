@@ -13,7 +13,7 @@
 | `KnowledgeBase/Files/<documentID>/...` | 导入原文件的本地副本 |
 | `Workflows/workflows.json` | 带格式版本的全局工作流定义 |
 | `Workflows/Runs/<workflowID>/<runID>/run.json` | 一次运行的状态、节点文本、警告与错误 |
-| `Workflows/Runs/<workflowID>/<runID>/Assets/` | 本次运行复制或下载的图片、视频与音频 |
+| `Workflows/Runs/<workflowID>/<runID>/Assets/` | 本次运行复制或下载的图片、视频、音频与输入文件夹 |
 
 历史版本可能留下 `projects.json`、`Projects/`、智能体相关文件和 `Knowledge/` 目录；当前版本不再读取或写入这些数据，也不会主动删除。当前知识库使用名称不同的 `KnowledgeBase/` 目录。
 

@@ -179,6 +179,9 @@ final class WorkflowStore {
             configuration.text = "请处理以下内容：\n\n{{input}}"
         case .llm:
             configuration.temperature = PromptItem.defaultTemperature
+        case .knowledgeImport:
+            configuration.temperature = 0.2
+            configuration.maxFiles = 50
         case .imageGeneration:
             configuration.mediaSize = ImageProvider.defaultSize
         case .videoGeneration:
@@ -372,9 +375,9 @@ final class WorkflowStore {
     /// 把相对媒体路径解析为本地文件 URL。
     func artifactURL(for value: WorkflowValue, run: WorkflowRun) -> URL? {
         switch value {
-        case .text:
+        case .text, .knowledgeCollection:
             return nil
-        case .image(let relative), .video(let relative), .audio(let relative):
+        case .image(let relative), .video(let relative), .audio(let relative), .folder(let relative):
             let url = runRoot(workflowID: run.workflowID, runID: run.id)
                 .appendingPathComponent(relative)
             return FileManager.default.fileExists(atPath: url.path) ? url : nil
@@ -402,7 +405,7 @@ final class WorkflowStore {
     private func loadDefinitions() {
         let url = definitionsURL
         guard FileManager.default.fileExists(atPath: url.path) else {
-            workflows = [WorkflowDefinition.starter()]
+            workflows = [WorkflowDefinition.knowledgeImport(), WorkflowDefinition.starter()]
             saveNow()
             return
         }
@@ -410,10 +413,105 @@ final class WorkflowStore {
             let data = try Data(contentsOf: url)
             let file = try decoder.decode(WorkflowDefinitionsFile.self, from: data)
             workflows = file.workflows
+            var needsSave = false
+            if !workflows.contains(where: { $0.id == WorkflowDefinition.knowledgeImportWorkflowID }) {
+                workflows.insert(WorkflowDefinition.knowledgeImport(), at: 0)
+                needsSave = true
+            }
+            if upgradeKnowledgeImportInputsIfNeeded() {
+                needsSave = true
+            }
+            if needsSave { saveNow() }
         } catch {
             lastError = error.localizedDescription
-            workflows = [WorkflowDefinition.starter()]
+            workflows = [WorkflowDefinition.knowledgeImport(), WorkflowDefinition.starter()]
         }
+    }
+
+    /// 为旧版知识入库节点补上显式提示词、知识集合输入节点与连线，并保留原节点配置。
+    private func upgradeKnowledgeImportInputsIfNeeded() -> Bool {
+        var changed = false
+        for workflowIndex in workflows.indices {
+            let importNodeIDs = workflows[workflowIndex].nodes
+                .filter { $0.kind == .knowledgeImport }
+                .map(\.id)
+            var changedWorkflow = false
+            for nodeID in importNodeIDs {
+                guard let nodeIndex = workflows[workflowIndex].nodes.firstIndex(where: { $0.id == nodeID }) else {
+                    continue
+                }
+
+                let importNode = workflows[workflowIndex].nodes[nodeIndex]
+                let hasPromptInput = workflows[workflowIndex].connections.contains {
+                    $0.targetNodeID == nodeID && $0.targetPortID == "prompt"
+                }
+                if !hasPromptInput {
+                    var configuration = WorkflowNodeConfiguration()
+                    configuration.parameterName = "知识整理提示词"
+                    configuration.runtimeInputType = .prompt
+                    configuration.promptCategory = .knowledgeImport
+                    configuration.promptItemID = importNode.configuration.promptItemID
+                    configuration.promptSnapshot = importNode.configuration.promptSnapshot.isEmpty
+                        ? DefaultPrompts.knowledgeImportPromptTemplate
+                        : importNode.configuration.promptSnapshot
+                    let promptNode = WorkflowNode(
+                        kind: .runtimeInput,
+                        position: WorkflowPoint(
+                            x: importNode.position.x - 350,
+                            y: importNode.position.y + 260
+                        ),
+                        configuration: configuration
+                    )
+                    workflows[workflowIndex].nodes.append(promptNode)
+                    workflows[workflowIndex].connections.append(
+                        WorkflowConnection(
+                            sourceNodeID: promptNode.id,
+                            sourcePortID: "prompt",
+                            targetNodeID: nodeID,
+                            targetPortID: "prompt"
+                        )
+                    )
+                    workflows[workflowIndex].nodes[nodeIndex].configuration.usesPromptLibrary = false
+                    workflows[workflowIndex].nodes[nodeIndex].configuration.promptItemID = nil
+                    workflows[workflowIndex].nodes[nodeIndex].configuration.promptSnapshot = ""
+                    changed = true
+                    changedWorkflow = true
+                }
+
+                let hasCollectionInput = workflows[workflowIndex].connections.contains {
+                    $0.targetNodeID == nodeID && $0.targetPortID == "collection"
+                }
+                if !hasCollectionInput {
+                    var configuration = WorkflowNodeConfiguration()
+                    configuration.parameterName = "知识集合"
+                    configuration.runtimeInputType = .knowledgeCollection
+                    configuration.collectionID = importNode.configuration.collectionID
+                    configuration.isRequired = false
+                    let collectionNode = WorkflowNode(
+                        kind: .runtimeInput,
+                        position: WorkflowPoint(
+                            x: importNode.position.x - 350,
+                            y: importNode.position.y + 480
+                        ),
+                        configuration: configuration
+                    )
+                    workflows[workflowIndex].nodes.append(collectionNode)
+                    workflows[workflowIndex].connections.append(
+                        WorkflowConnection(
+                            sourceNodeID: collectionNode.id,
+                            sourcePortID: "knowledgeCollection",
+                            targetNodeID: nodeID,
+                            targetPortID: "collection"
+                        )
+                    )
+                    workflows[workflowIndex].nodes[nodeIndex].configuration.collectionID = nil
+                    changed = true
+                    changedWorkflow = true
+                }
+            }
+            if changedWorkflow { workflows[workflowIndex].updatedAt = Date() }
+        }
+        return changed
     }
 
     private func availableName(base: String) -> String {
@@ -438,7 +536,7 @@ final class WorkflowStore {
 }
 
 private struct WorkflowDefinitionsFile: Codable {
-    static let currentFormatVersion = 2
+    static let currentFormatVersion = 3
 
     var formatVersion: Int
     var workflows: [WorkflowDefinition]

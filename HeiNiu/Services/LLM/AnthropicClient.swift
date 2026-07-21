@@ -170,12 +170,9 @@ struct AnthropicClient: LLMClient {
             .map(\.content)
             .joined(separator: "\n\n")
 
-        let chatMessages: [[String: String]] = messages
+        let chatMessages: [[String: Any]] = messages
             .filter { $0.role != .system }
-            .map { msg in
-                let role = msg.role == .assistant ? "assistant" : "user"
-                return ["role": role, "content": msg.content]
-            }
+            .map(Self.messagePayload)
 
         var payload: [String: Any] = [
             "model": model,
@@ -204,6 +201,28 @@ struct AnthropicClient: LLMClient {
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload)
         return request
+    }
+
+    /// 把统一消息转换为 Anthropic 的文本或 `image` / `text` 内容块。
+    static func messagePayload(_ message: LLMChatMessage) -> [String: Any] {
+        let role = message.role == .assistant ? "assistant" : "user"
+        guard !message.images.isEmpty else {
+            return ["role": role, "content": message.content]
+        }
+        var blocks: [[String: Any]] = message.images.map { image in
+            [
+                "type": "image",
+                "source": [
+                    "type": "base64",
+                    "media_type": image.mediaType,
+                    "data": image.data.base64EncodedString(),
+                ],
+            ]
+        }
+        if !message.content.isEmpty {
+            blocks.append(["type": "text", "text": message.content])
+        }
+        return ["role": role, "content": blocks]
     }
 
     private static func thinkingBudget(for effort: ReasoningEffort) -> Int? {

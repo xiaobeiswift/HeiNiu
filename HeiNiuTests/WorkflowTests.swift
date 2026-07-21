@@ -42,16 +42,20 @@ final class WorkflowModelTests: XCTestCase {
     }
 
     @MainActor
-    func testVersionTwoAudioAndLegacyRuntimeInputsRoundTrip() throws {
+    func testVersionThreeFolderAudioAndLegacyRuntimeInputsRoundTrip() throws {
         let legacy = try JSONDecoder().decode(
             WorkflowRun.self,
             from: Data(#"{"formatVersion":1,"status":"succeeded","runtimeInputs":{"brief":"旧文本"},"nodeRuns":[]}"#.utf8)
         )
-        XCTAssertEqual(legacy.formatVersion, 2)
+        XCTAssertEqual(legacy.formatVersion, WorkflowRun.currentFormatVersion)
         XCTAssertEqual(legacy.runtimeInputs["brief"], .text("旧文本"))
 
         let value = WorkflowValue.audio("Assets/voice.wav")
         XCTAssertEqual(try JSONDecoder().decode(WorkflowValue.self, from: JSONEncoder().encode(value)), value)
+        let folder = WorkflowValue.folder("Assets/images")
+        XCTAssertEqual(try JSONDecoder().decode(WorkflowValue.self, from: JSONEncoder().encode(folder)), folder)
+        let collection = WorkflowValue.knowledgeCollection(UUID().uuidString)
+        XCTAssertEqual(try JSONDecoder().decode(WorkflowValue.self, from: JSONEncoder().encode(collection)), collection)
 
         let connection = WorkflowConnection(
             sourceNodeID: UUID(),
@@ -62,6 +66,117 @@ final class WorkflowModelTests: XCTestCase {
         )
         let decoded = try JSONDecoder().decode(WorkflowConnection.self, from: JSONEncoder().encode(connection))
         XCTAssertEqual(decoded.targetOrder, 2)
+    }
+
+    @MainActor
+    func testBuiltInKnowledgeImportWorkflowHasFolderPromptAndOutput() throws {
+        let workflow = WorkflowDefinition.knowledgeImport()
+        XCTAssertEqual(workflow.id, WorkflowDefinition.knowledgeImportWorkflowID)
+        XCTAssertEqual(workflow.name, "添加知识库")
+        XCTAssertEqual(workflow.nodes.filter { $0.kind == .runtimeInput }.count, 4)
+        XCTAssertTrue(workflow.nodes.contains {
+            $0.kind == .runtimeInput && $0.configuration.runtimeInputType == .folder
+        })
+        let promptNode = try XCTUnwrap(workflow.nodes.first {
+            $0.kind == .runtimeInput && $0.configuration.runtimeInputType == .prompt
+        })
+        XCTAssertEqual(promptNode.configuration.promptCategory, .knowledgeImport)
+        XCTAssertEqual(promptNode.configuration.promptSnapshot, DefaultPrompts.knowledgeImportPromptTemplate)
+        let collectionNode = try XCTUnwrap(workflow.nodes.first {
+            $0.kind == .runtimeInput && $0.configuration.runtimeInputType == .knowledgeCollection
+        })
+        XCTAssertFalse(collectionNode.configuration.isRequired)
+        let importNode = try XCTUnwrap(workflow.nodes.first { $0.kind == .knowledgeImport })
+        XCTAssertFalse(importNode.configuration.usesPromptLibrary)
+        let ports = importNode.descriptor.ports(for: importNode)
+        XCTAssertTrue(ports.contains { $0.id == "folder" && $0.valueType == .folder && $0.isRequired })
+        XCTAssertTrue(ports.contains { $0.id == "prompt" && $0.valueType == .text && $0.isRequired })
+        XCTAssertTrue(ports.contains { $0.id == "instructions" && $0.valueType == .text && $0.isRequired })
+        XCTAssertTrue(ports.contains { $0.id == "collection" && $0.valueType == .knowledgeCollection && $0.isRequired })
+        XCTAssertTrue(workflow.connections.contains {
+            $0.sourceNodeID == promptNode.id && $0.sourcePortID == "prompt" &&
+            $0.targetNodeID == importNode.id && $0.targetPortID == "prompt"
+        })
+        XCTAssertTrue(workflow.connections.contains {
+            $0.sourceNodeID == collectionNode.id && $0.sourcePortID == "knowledgeCollection" &&
+            $0.targetNodeID == importNode.id && $0.targetPortID == "collection"
+        })
+        XCTAssertEqual(workflow.connections.count, 5)
+        XCTAssertEqual(WorkflowValidator.estimateCosts(workflow).llmCalls, 50)
+    }
+
+    @MainActor
+    func testKnowledgeImportPromptCategoryAndDefaultTemplate() throws {
+        XCTAssertEqual(PromptCategory.knowledgeImport.displayName, "知识库添加")
+        XCTAssertEqual(PromptCategory.knowledgeImport.suggestedVariables, ["filename", "requirements"])
+
+        let prompt = try XCTUnwrap(
+            DefaultPrompts.seedItems().first {
+                $0.category == .knowledgeImport && $0.name == "图片知识整理"
+            }
+        )
+        XCTAssertTrue(prompt.isBuiltIn)
+        XCTAssertTrue(prompt.template.contains("{{filename}}"))
+        XCTAssertTrue(prompt.template.contains("{{requirements}}"))
+        XCTAssertTrue(DefaultPrompts.blankTemplate(for: .knowledgeImport).contains("{{filename}}"))
+
+        let settings = SettingsStore()
+        settings.promptItems = [
+            PromptItem(
+                category: .knowledgeImport,
+                name: DefaultPrompts.knowledgeImportPromptName,
+                template: "最新版：{{filename}} / {{requirements}}"
+            ),
+        ]
+        var promptNode = try XCTUnwrap(
+            WorkflowDefinition.knowledgeImport().nodes.first {
+                $0.kind == .runtimeInput && $0.configuration.runtimeInputType == .prompt
+            }
+        )
+        let resolved = WorkflowValidator.resolvedRuntimePrompt(for: promptNode, settings: settings)
+        XCTAssertEqual(resolved.template, "最新版：{{filename}} / {{requirements}}")
+        XCTAssertFalse(resolved.usedSnapshot)
+
+        let runtimePrompt = PromptItem(
+            category: .knowledgeImport,
+            name: "本次人物服装提取",
+            template: "只整理人物服装：{{filename}} / {{requirements}}"
+        )
+        settings.promptItems.append(runtimePrompt)
+        promptNode.configuration.promptItemID = runtimePrompt.id
+        promptNode.configuration.promptSnapshot = runtimePrompt.template
+        let runtimeResolved = WorkflowValidator.resolvedRuntimePrompt(for: promptNode, settings: settings)
+        XCTAssertEqual(runtimeResolved.template, runtimePrompt.template)
+        XCTAssertFalse(runtimeResolved.usedSnapshot)
+
+        settings.promptItems.removeAll { $0.id == runtimePrompt.id }
+        let snapshotResolved = WorkflowValidator.resolvedRuntimePrompt(for: promptNode, settings: settings)
+        XCTAssertEqual(snapshotResolved.template, runtimePrompt.template)
+        XCTAssertTrue(snapshotResolved.usedSnapshot)
+    }
+
+    @MainActor
+    func testVisionMessagesUseProviderSpecificImagePayloads() throws {
+        let bytes = Data([0x01, 0x02, 0x03])
+        let image = LLMImageAttachment(data: bytes, mediaType: "image/jpeg")
+        let message = LLMChatMessage(role: .user, content: "整理图片", images: [image])
+
+        let chat = OpenAICompatibleClient.chatMessagePayload(message)
+        let chatBlocks = try XCTUnwrap(chat["content"] as? [[String: Any]])
+        XCTAssertEqual(chatBlocks.first?["type"] as? String, "text")
+        let chatImage = try XCTUnwrap(chatBlocks.last?["image_url"] as? [String: Any])
+        XCTAssertEqual(chatImage["url"] as? String, "data:image/jpeg;base64,AQID")
+
+        let responses = OpenAICompatibleClient.responsesMessagePayload(message)
+        let responseBlocks = try XCTUnwrap(responses["content"] as? [[String: Any]])
+        XCTAssertEqual(responseBlocks.last?["type"] as? String, "input_image")
+        XCTAssertEqual(responseBlocks.last?["image_url"] as? String, "data:image/jpeg;base64,AQID")
+
+        let anthropic = AnthropicClient.messagePayload(message)
+        let anthropicBlocks = try XCTUnwrap(anthropic["content"] as? [[String: Any]])
+        let source = try XCTUnwrap(anthropicBlocks.first?["source"] as? [String: Any])
+        XCTAssertEqual(source["media_type"] as? String, "image/jpeg")
+        XCTAssertEqual(source["data"] as? String, "AQID")
     }
 
     @MainActor
@@ -155,7 +270,7 @@ final class WorkflowModelTests: XCTestCase {
             }
         }
 
-        let chargedKinds: Set<WorkflowNodeKind> = [.knowledgeSearch, .llm, .imageGeneration, .videoGeneration, .loop]
+        let chargedKinds: Set<WorkflowNodeKind> = [.knowledgeSearch, .knowledgeImport, .llm, .imageGeneration, .videoGeneration, .loop]
         for kind in chargedKinds {
             XCTAssertFalse(WorkflowNodeCatalog.descriptor(for: kind).usage.warnings.isEmpty, kind.id)
         }
@@ -285,9 +400,10 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
         let definitions = root.appendingPathComponent("workflows.json")
         XCTAssertTrue(FileManager.default.fileExists(atPath: definitions.path))
         let definitionsObject = try JSONSerialization.jsonObject(with: Data(contentsOf: definitions)) as? [String: Any]
-        XCTAssertEqual(definitionsObject?["formatVersion"] as? Int, 2)
+        XCTAssertEqual(definitionsObject?["formatVersion"] as? Int, 3)
         let reloaded = WorkflowStore(rootURL: root)
         XCTAssertEqual(reloaded.workflow(id: workflowID)?.name, "持久化测试")
+        XCTAssertNotNil(reloaded.workflow(id: WorkflowDefinition.knowledgeImportWorkflowID))
         let rootNames = try FileManager.default.contentsOfDirectory(atPath: root.path)
         XCTAssertEqual(Set(rootNames), Set(["Runs", "workflows.json"]))
 
@@ -306,11 +422,79 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
         let runFile = reloaded.runRoot(workflowID: workflowID, runID: run.id).appendingPathComponent("run.json")
         XCTAssertTrue(FileManager.default.fileExists(atPath: runFile.path))
         let runObject = try JSONSerialization.jsonObject(with: Data(contentsOf: runFile)) as? [String: Any]
-        XCTAssertEqual(runObject?["formatVersion"] as? Int, 2)
+        XCTAssertEqual(runObject?["formatVersion"] as? Int, WorkflowRun.currentFormatVersion)
 
         reloaded.deleteRun(workflowID: workflowID, runID: run.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: runFile.path))
         XCTAssertTrue(reloaded.runsByWorkflowID[workflowID]?.isEmpty == true)
+    }
+
+    @MainActor
+    func testLegacyKnowledgeImportAddsExplicitPromptInputAndKeepsConfiguration() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkflowStore(rootURL: root)
+        let workflow = try XCTUnwrap(store.workflow(id: WorkflowDefinition.knowledgeImportWorkflowID))
+        var importNode = try XCTUnwrap(
+            store.workflow(id: WorkflowDefinition.knowledgeImportWorkflowID)?.nodes.first {
+                $0.kind == .knowledgeImport
+            }
+        )
+        let oldPromptID = UUID()
+        let oldCollectionID = UUID()
+        importNode.configuration.usesPromptLibrary = true
+        importNode.configuration.promptItemID = oldPromptID
+        importNode.configuration.promptSnapshot = "保留旧版提示词"
+        importNode.configuration.collectionID = oldCollectionID
+        importNode.configuration.systemPrompt = "保留我的补充要求"
+        importNode.configuration.model = "vision-model"
+        store.mutateWorkflow(id: workflow.id) { draft in
+            draft.nodes.removeAll {
+                $0.kind == .runtimeInput &&
+                ($0.configuration.runtimeInputType == .prompt ||
+                 $0.configuration.runtimeInputType == .knowledgeCollection)
+            }
+            draft.connections.removeAll {
+                $0.targetNodeID == importNode.id &&
+                ($0.targetPortID == "prompt" || $0.targetPortID == "collection")
+            }
+            if let index = draft.nodes.firstIndex(where: { $0.id == importNode.id }) {
+                draft.nodes[index] = importNode
+            }
+        }
+        store.saveNow()
+
+        let reloaded = WorkflowStore(rootURL: root)
+        let upgradedWorkflow = try XCTUnwrap(reloaded.workflow(id: WorkflowDefinition.knowledgeImportWorkflowID))
+        let upgraded = try XCTUnwrap(
+            upgradedWorkflow.nodes.first {
+                $0.kind == .knowledgeImport
+            }
+        )
+        let promptInput = try XCTUnwrap(upgradedWorkflow.nodes.first {
+            $0.kind == .runtimeInput && $0.configuration.runtimeInputType == .prompt
+        })
+        XCTAssertEqual(promptInput.configuration.promptCategory, .knowledgeImport)
+        XCTAssertEqual(promptInput.configuration.promptItemID, oldPromptID)
+        XCTAssertEqual(promptInput.configuration.promptSnapshot, "保留旧版提示词")
+        XCTAssertTrue(upgradedWorkflow.connections.contains {
+            $0.sourceNodeID == promptInput.id && $0.sourcePortID == "prompt" &&
+            $0.targetNodeID == upgraded.id && $0.targetPortID == "prompt"
+        })
+        let collectionInput = try XCTUnwrap(upgradedWorkflow.nodes.first {
+            $0.kind == .runtimeInput && $0.configuration.runtimeInputType == .knowledgeCollection
+        })
+        XCTAssertEqual(collectionInput.configuration.collectionID, oldCollectionID)
+        XCTAssertTrue(upgradedWorkflow.connections.contains {
+            $0.sourceNodeID == collectionInput.id && $0.sourcePortID == "knowledgeCollection" &&
+            $0.targetNodeID == upgraded.id && $0.targetPortID == "collection"
+        })
+        XCTAssertFalse(upgraded.configuration.usesPromptLibrary)
+        XCTAssertNil(upgraded.configuration.promptItemID)
+        XCTAssertTrue(upgraded.configuration.promptSnapshot.isEmpty)
+        XCTAssertNil(upgraded.configuration.collectionID)
+        XCTAssertEqual(upgraded.configuration.systemPrompt, "保留我的补充要求")
+        XCTAssertEqual(upgraded.configuration.model, "vision-model")
     }
 
     private func temporaryDirectory() throws -> URL {
@@ -322,6 +506,49 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
 }
 
 final class WorkflowExecutorTests: XCTestCase {
+    @MainActor
+    func testFolderRuntimeInputCopiesDirectoryIntoRunAssets() async throws {
+        let root = try temporaryDirectory()
+        let source = try temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: source)
+        }
+        try Data("image-bytes".utf8).write(to: source.appendingPathComponent("frame.jpg"))
+        let store = WorkflowStore(rootURL: root)
+        let executor = WorkflowExecutor()
+
+        var configuration = WorkflowNodeConfiguration()
+        configuration.parameterName = "图片文件夹"
+        configuration.runtimeInputType = .folder
+        let input = WorkflowNode(kind: .runtimeInput, position: .zero, configuration: configuration)
+        let output = WorkflowNode(kind: .output, position: WorkflowPoint(x: 200, y: 0))
+        let workflow = WorkflowDefinition(
+            name: "文件夹输入",
+            nodes: [input, output],
+            connections: [
+                WorkflowConnection(sourceNodeID: input.id, sourcePortID: "folder", targetNodeID: output.id, targetPortID: "value"),
+            ]
+        )
+
+        executor.start(
+            workflow: workflow,
+            targetNodeID: nil,
+            runtimeInputs: [input.id.uuidString: .folder(source.path)],
+            settings: SettingsStore(),
+            knowledge: StubKnowledgeSearch(),
+            store: store
+        )
+        try await waitUntilFinished(executor)
+
+        XCTAssertEqual(store.activeRun?.status, .succeeded)
+        let value = try XCTUnwrap(store.activeRun?.nodeRun(id: output.id)?.outputs["value"])
+        guard case .folder = value else { return XCTFail("结果应保留文件夹类型") }
+        let run = try XCTUnwrap(store.activeRun)
+        let copied = try XCTUnwrap(store.artifactURL(for: value, run: run))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: copied.appendingPathComponent("frame.jpg").path))
+    }
+
     @MainActor
     func testConditionBranchRunsSeriallyAndSkipsUnselectedOutput() async throws {
         let root = try temporaryDirectory()
@@ -1036,7 +1263,7 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
 }
 
 @MainActor
-private final class StubKnowledgeSearch: WorkflowKnowledgeSearching {
+private final class StubKnowledgeSearch: WorkflowKnowledgeAccessing {
     func search(
         query: String,
         settings: SettingsStore,

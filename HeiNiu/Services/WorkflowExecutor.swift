@@ -1,11 +1,13 @@
 /// 工作流串行执行器：条件分支、显式循环、模型调用与媒体产物。
 
 import Foundation
+import ImageIO
 import Observation
+import UniformTypeIdentifiers
 
-/// 执行器所需的知识检索最小接口，便于使用隔离模拟实现验证调度。
+/// 执行器所需的知识检索与写入接口，便于使用隔离模拟实现验证调度。
 @MainActor
-protocol WorkflowKnowledgeSearching {
+protocol WorkflowKnowledgeAccessing {
     func search(
         query: String,
         settings: SettingsStore,
@@ -13,9 +15,42 @@ protocol WorkflowKnowledgeSearching {
         tags: [String],
         limit: Int
     ) async throws -> [KnowledgeSearchResult]
+
+    /// 保存工作流视觉模型生成的一条带原图资料。
+    func addGeneratedFile(
+        sourceURL: URL,
+        title: String,
+        content: String,
+        collectionID: UUID?,
+        tags: [String]
+    ) throws -> KnowledgeWriteResult
+
+    /// 为刚写入的资料建立索引并返回最终状态。
+    func indexGeneratedDocument(id: UUID, settings: SettingsStore) async -> KnowledgeIndexStatus
 }
 
-extension KnowledgeStore: WorkflowKnowledgeSearching {}
+extension WorkflowKnowledgeAccessing {
+    func addGeneratedFile(
+        sourceURL: URL,
+        title: String,
+        content: String,
+        collectionID: UUID?,
+        tags: [String]
+    ) throws -> KnowledgeWriteResult {
+        throw LLMError.underlying("当前知识库实现不支持工作流写入")
+    }
+
+    func indexGeneratedDocument(id: UUID, settings: SettingsStore) async -> KnowledgeIndexStatus {
+        .pending
+    }
+}
+
+extension KnowledgeStore: WorkflowKnowledgeAccessing {
+    func indexGeneratedDocument(id: UUID, settings: SettingsStore) async -> KnowledgeIndexStatus {
+        await indexDocument(id: id, settings: settings)
+        return document(id: id)?.indexStatus ?? .failed
+    }
+}
 
 /// 工作流执行期错误。
 enum WorkflowExecutionError: LocalizedError {
@@ -65,7 +100,7 @@ final class WorkflowExecutor {
         targetNodeID: UUID?,
         runtimeInputs: [String: WorkflowValue],
         settings: SettingsStore,
-        knowledge: any WorkflowKnowledgeSearching,
+        knowledge: any WorkflowKnowledgeAccessing,
         store: WorkflowStore
     ) {
         guard !isRunning else { return }
@@ -74,7 +109,7 @@ final class WorkflowExecutor {
         let relevant = relevantNodeIDs(targetNodeID: targetNodeID, workflow: workflow)
         for node in workflow.nodes where relevant.contains(node.id) && node.kind == .runtimeInput {
             let value = runtimeInputs[node.id.uuidString]
-                ?? (node.configuration.runtimeInputType == .text ? .text(node.configuration.text) : nil)
+                ?? runtimeDefaultValue(for: node, settings: settings)
             if node.configuration.isRequired && (value?.payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) {
                 issues.append(WorkflowValidationIssue(
                     severity: .error,
@@ -110,12 +145,29 @@ final class WorkflowExecutor {
         statusMessage = "正在停止"
     }
 
+    /// 返回运行输入节点配置的默认值；提示词输入会跟随提示词库中的当前正文。
+    private func runtimeDefaultValue(
+        for node: WorkflowNode,
+        settings: SettingsStore
+    ) -> WorkflowValue? {
+        switch node.configuration.runtimeInputType {
+        case .text:
+            return .text(node.configuration.text)
+        case .prompt:
+            return .text(WorkflowValidator.resolvedRuntimePrompt(for: node, settings: settings).template)
+        case .knowledgeCollection:
+            return .knowledgeCollection(node.configuration.collectionID?.uuidString ?? "")
+        case .image, .video, .audio, .folder:
+            return nil
+        }
+    }
+
     private func performRun(
         workflow: WorkflowDefinition,
         targetNodeID: UUID?,
         runtimeInputs: [String: WorkflowValue],
         settings: SettingsStore,
-        knowledge: any WorkflowKnowledgeSearching,
+        knowledge: any WorkflowKnowledgeAccessing,
         store: WorkflowStore
     ) async {
         let relevant = relevantNodeIDs(targetNodeID: targetNodeID, workflow: workflow)
@@ -230,7 +282,7 @@ final class WorkflowExecutor {
         runtimeInputs: [String: WorkflowValue],
         runID: UUID,
         settings: SettingsStore,
-        knowledge: any WorkflowKnowledgeSearching,
+        knowledge: any WorkflowKnowledgeAccessing,
         store: WorkflowStore
     ) async throws -> [String: WorkflowValue] {
         guard let loop = workflow.nodes.first(where: { $0.id == component.loopNodeID }),
@@ -347,7 +399,7 @@ final class WorkflowExecutor {
         workflow: WorkflowDefinition,
         runID: UUID,
         settings: SettingsStore,
-        knowledge: any WorkflowKnowledgeSearching,
+        knowledge: any WorkflowKnowledgeAccessing,
         store: WorkflowStore,
         iteration: Int?
     ) async throws -> [String: WorkflowValue] {
@@ -403,7 +455,7 @@ final class WorkflowExecutor {
         workflow: WorkflowDefinition,
         runID: UUID,
         settings: SettingsStore,
-        knowledge: any WorkflowKnowledgeSearching,
+        knowledge: any WorkflowKnowledgeAccessing,
         store: WorkflowStore
     ) async throws -> [String: WorkflowValue] {
         try Task.checkCancellation()
@@ -413,7 +465,7 @@ final class WorkflowExecutor {
         case .runtimeInput:
             let expectedType = node.configuration.runtimeInputType.valueType
             let value = runtimeInputs[node.id.uuidString]
-                ?? (node.configuration.runtimeInputType == .text ? .text(node.configuration.text) : nil)
+                ?? runtimeDefaultValue(for: node, settings: settings)
             guard let value else {
                 throw WorkflowExecutionError.missingInput(node.configuration.parameterName)
             }
@@ -462,6 +514,132 @@ final class WorkflowExecutor {
                 "[\($0.documentTitle)#片段\($0.ordinal + 1) · \(String(format: "%.3f", $0.score))]\n\($0.text)"
             }.joined(separator: "\n\n")
             return ["context": .text(text)]
+
+        case .knowledgeImport:
+            guard case .folder(let relativeFolder) = inputs["folder"]?.first,
+                  case .text(let knowledgePromptTemplate) = inputs["prompt"]?.first,
+                  case .text(let instructions) = inputs["instructions"]?.first,
+                  case .knowledgeCollection(let collectionReference) = inputs["collection"]?.first,
+                  let provider = settings.provider(id: node.configuration.providerID)
+            else { throw WorkflowExecutionError.invalidValue("添加知识库节点需要图片文件夹、知识整理提示词、整理要求、知识集合和有效 LLM 服务商") }
+            let targetCollectionID = UUID(uuidString: collectionReference)
+            guard provider.supportsVision else {
+                throw WorkflowExecutionError.invalidValue("“\(provider.name)”未开启视觉能力，不能理解图片")
+            }
+            let model = node.configuration.model.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !model.isEmpty else { throw LLMError.missingModel }
+            let apiKey = settings.apiKey(for: provider.id)
+            guard !apiKey.isEmpty else { throw LLMError.missingAPIKey }
+
+            let runRoot = store.runRoot(workflowID: workflow.id, runID: runID)
+            let folderURL = runRoot.appendingPathComponent(relativeFolder, isDirectory: true).standardizedFileURL
+            guard folderURL.path.hasPrefix(runRoot.standardizedFileURL.path + "/") else {
+                throw WorkflowExecutionError.invalidValue("图片文件夹路径超出本次运行目录")
+            }
+            let allImages = try imageFiles(in: folderURL)
+            guard !allImages.isEmpty else {
+                throw WorkflowExecutionError.invalidValue("所选文件夹内没有可处理的图片")
+            }
+            let limit = max(1, min(500, node.configuration.maxFiles))
+            let images = Array(allImages.prefix(limit))
+            if allImages.count > limit {
+                appendWarning(
+                    "图片文件夹共有 \(allImages.count) 张支持的图片，本次按上限只处理前 \(limit) 张",
+                    runID: runID,
+                    store: store
+                )
+            }
+
+            let cleanInstructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanInstructions.isEmpty else { throw WorkflowExecutionError.missingInput("整理要求") }
+            let cleanKnowledgePrompt = knowledgePromptTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleanKnowledgePrompt.isEmpty else { throw WorkflowExecutionError.missingInput("知识整理提示词") }
+            let client = LLMClientFactory.make(for: provider)
+            let shouldIndex = canAutomaticallyIndex(settings: settings)
+            var created = 0
+            var duplicates = 0
+            var indexed = 0
+            var indexFailures = 0
+            var failures: [String] = []
+
+            for (offset, imageURL) in images.enumerated() {
+                try Task.checkCancellation()
+                let progress = Double(offset) / Double(images.count)
+                updateNodeRun(
+                    nodeID: node.id,
+                    runID: runID,
+                    store: store,
+                    status: .running,
+                    message: "正在理解第 \(offset + 1)/\(images.count) 张：\(imageURL.lastPathComponent)",
+                    progress: progress,
+                    persist: true
+                )
+                do {
+                    let attachment = try visionAttachment(from: imageURL)
+                    let completion = try await client.complete(
+                        messages: knowledgeImportMessages(
+                            image: attachment,
+                            filename: imageURL.lastPathComponent,
+                            instructions: cleanInstructions,
+                            knowledgePromptTemplate: cleanKnowledgePrompt,
+                            additionalSystemPrompt: node.configuration.systemPrompt
+                        ),
+                        model: model,
+                        temperature: node.configuration.temperature,
+                        reasoningEffort: node.configuration.reasoningEffort,
+                        apiKey: apiKey
+                    )
+                    let generated = parseGeneratedKnowledge(
+                        completion.content,
+                        fallbackTitle: imageURL.deletingPathExtension().lastPathComponent
+                    )
+                    let write = try knowledge.addGeneratedFile(
+                        sourceURL: imageURL,
+                        title: generated.title,
+                        content: generated.content,
+                        collectionID: targetCollectionID,
+                        tags: node.configuration.tags + generated.tags
+                    )
+                    if write.wasCreated {
+                        created += 1
+                        if shouldIndex {
+                            let status = await knowledge.indexGeneratedDocument(id: write.documentID, settings: settings)
+                            if status == .ready { indexed += 1 } else { indexFailures += 1 }
+                        }
+                    } else {
+                        duplicates += 1
+                    }
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    failures.append("\(imageURL.lastPathComponent)：\(error.localizedDescription)")
+                }
+            }
+
+            guard created + duplicates > 0 else {
+                throw WorkflowExecutionError.invalidValue(
+                    "图片均未能写入知识库：\(failures.prefix(3).joined(separator: "；"))"
+                )
+            }
+            if !failures.isEmpty {
+                appendWarning("有 \(failures.count) 张图片处理失败", runID: runID, store: store)
+            }
+            if indexFailures > 0 {
+                appendWarning("有 \(indexFailures) 条新资料未能完成向量索引，可在知识库中重试", runID: runID, store: store)
+            }
+            let indexLine = shouldIndex
+                ? "自动索引：成功 \(indexed) 条，失败 \(indexFailures) 条"
+                : "自动索引：未配置可用的嵌入服务，资料保持等待索引"
+            var summary = [
+                "图片知识入库完成",
+                "扫描 \(allImages.count) 张，本次处理 \(images.count) 张",
+                "新增 \(created) 条，跳过重复 \(duplicates) 条，失败 \(failures.count) 条",
+                indexLine,
+            ]
+            if !failures.isEmpty {
+                summary.append("失败明细：\n" + failures.map { "- \($0)" }.joined(separator: "\n"))
+            }
+            return ["summary": .text(summary.joined(separator: "\n"))]
 
         case .llm:
             guard case .text(let prompt) = inputs["prompt"]?.first,
@@ -600,6 +778,165 @@ final class WorkflowExecutor {
         }
     }
 
+    /// 递归列出文件夹中的支持图片，使用相对路径稳定排序。
+    private func imageFiles(in folder: URL) throws -> [URL] {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw WorkflowExecutionError.invalidValue("图片文件夹不存在或不可读")
+        }
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentTypeKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: folder,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { throw WorkflowExecutionError.invalidValue("无法读取图片文件夹") }
+        let fallbackExtensions: Set<String> = ["jpg", "jpeg", "png", "webp", "heic", "heif", "tif", "tiff", "bmp", "gif"]
+        var result: [URL] = []
+        for case let url as URL in enumerator {
+            let values = try? url.resourceValues(forKeys: Set(keys))
+            guard values?.isRegularFile == true else { continue }
+            let isImage = values?.contentType?.conforms(to: .image) == true
+                || fallbackExtensions.contains(url.pathExtension.lowercased())
+            if isImage { result.append(url) }
+        }
+        return result.sorted {
+            $0.path.localizedStandardCompare($1.path) == .orderedAscending
+        }
+    }
+
+    /// 将任意可解码图片缩放并转为兼容面更广的 JPEG 视觉附件。
+    private func visionAttachment(from url: URL) throws -> LLMImageAttachment {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw WorkflowExecutionError.invalidValue("无法解码图片：\(url.lastPathComponent)")
+        }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 2_560,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+            throw WorkflowExecutionError.invalidValue("无法读取图片画面：\(url.lastPathComponent)")
+        }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            output as CFMutableData,
+            UTType.jpeg.identifier as CFString,
+            1,
+            nil
+        ) else { throw WorkflowExecutionError.invalidValue("无法创建视觉图片数据") }
+        CGImageDestinationAddImage(
+            destination,
+            image,
+            [kCGImageDestinationLossyCompressionQuality: 0.88] as CFDictionary
+        )
+        guard CGImageDestinationFinalize(destination) else {
+            throw WorkflowExecutionError.invalidValue("无法编码图片：\(url.lastPathComponent)")
+        }
+        return LLMImageAttachment(data: output as Data, mediaType: "image/jpeg")
+    }
+
+    /// 为单张图片构建约束清晰、同时允许用户自定义提炼目标的视觉消息。
+    private func knowledgeImportMessages(
+        image: LLMImageAttachment,
+        filename: String,
+        instructions: String,
+        knowledgePromptTemplate: String,
+        additionalSystemPrompt: String
+    ) -> [LLMChatMessage] {
+        var system = """
+        你是黑妞短剧的知识整理助手。请理解用户提供的图片，并把可复用、可检索的事实整理为知识资料。
+        只返回一个 JSON 对象，不要使用 Markdown 代码块。JSON 必须包含：
+        {"title":"简洁准确的中文标题","content":"完整知识正文","tags":["标签"]}
+        content 必须能够脱离图片单独理解；不要编造图片无法确认的事实。tags 使用简短中文词语。
+        """
+        let managedPrompt = renderKnowledgeImportPrompt(
+            knowledgePromptTemplate,
+            filename: filename,
+            requirements: instructions
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !managedPrompt.isEmpty { system += "\n\n知识整理提示词：\n\(managedPrompt)" }
+        let extra = additionalSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !extra.isEmpty { system += "\n\n补充系统要求：\n\(extra)" }
+        let user = """
+        文件名：\(filename)
+
+        用户整理要求：
+        \(instructions)
+        """
+        return [
+            LLMChatMessage(role: .system, content: system),
+            LLMChatMessage(role: .user, content: user, images: [image]),
+        ]
+    }
+
+    /// 替换知识整理模板中的逐图文件名和本次运行要求。
+    private func renderKnowledgeImportPrompt(
+        _ template: String,
+        filename: String,
+        requirements: String
+    ) -> String {
+        var output = template
+        for (name, value) in [("filename", filename), ("requirements", requirements)] {
+            let pattern = #"\{\{\s*"# + NSRegularExpression.escapedPattern(for: name) + #"\s*\}\}"#
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(output.startIndex..<output.endIndex, in: output)
+            output = regex.stringByReplacingMatches(
+                in: output,
+                range: range,
+                withTemplate: NSRegularExpression.escapedTemplate(for: value)
+            )
+        }
+        return output
+    }
+
+    /// 容错解析视觉模型 JSON；非 JSON 回答仍作为正文入库，避免丢失已生成内容。
+    private func parseGeneratedKnowledge(_ response: String, fallbackTitle: String) -> GeneratedKnowledge {
+        var clean = response.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.hasPrefix("```") {
+            clean = clean.replacingOccurrences(of: #"^```(?:json)?\s*"#, with: "", options: [.regularExpression, .caseInsensitive])
+            clean = clean.replacingOccurrences(of: #"\s*```$"#, with: "", options: .regularExpression)
+        }
+        guard let first = clean.firstIndex(of: "{"), let last = clean.lastIndex(of: "}"), first <= last else {
+            return GeneratedKnowledge(title: fallbackTitle, content: clean, tags: [])
+        }
+        let json = String(clean[first...last])
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return GeneratedKnowledge(title: fallbackTitle, content: clean, tags: []) }
+
+        let titleKeys = ["title", "标题", "name"]
+        let contentKeys = ["content", "正文", "knowledge", "description", "summary"]
+        let title = titleKeys.compactMap { object[$0] as? String }.first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let content = contentKeys.compactMap { object[$0] as? String }.first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var tags: [String] = []
+        if let values = object["tags"] as? [String] {
+            tags = values
+        } else if let value = object["tags"] as? String ?? object["标签"] as? String {
+            tags = value.components(separatedBy: CharacterSet(charactersIn: ",，、"))
+        } else if let values = object["标签"] as? [String] {
+            tags = values
+        }
+        let normalizedTags = tags
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return GeneratedKnowledge(
+            title: title?.isEmpty == false ? title! : fallbackTitle,
+            content: content?.isEmpty == false ? content! : clean,
+            tags: normalizedTags
+        )
+    }
+
+    /// 只有嵌入配置、模型和钥匙串密钥都齐全时才自动索引，写入本身不受影响。
+    private func canAutomaticallyIndex(settings: SettingsStore) -> Bool {
+        guard let providerID = settings.knowledgeEmbeddingProviderID,
+              !settings.knowledgeEmbeddingModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return false }
+        return !settings.apiKey(for: providerID).isEmpty
+    }
+
     // MARK: - Scheduling helpers
 
     private func relevantNodeIDs(targetNodeID: UUID?, workflow: WorkflowDefinition) -> Set<UUID> {
@@ -667,11 +1004,28 @@ final class WorkflowExecutor {
         try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
         var result: [String: WorkflowValue] = [:]
         for (key, value) in values {
-            guard value.valueType != .text else {
+            guard value.valueType != .text, value.valueType != .knowledgeCollection else {
                 result[key] = value
                 continue
             }
             let source = URL(fileURLWithPath: value.payload)
+            if value.valueType == .folder {
+                var isDirectory: ObjCBool = false
+                guard source.isFileURL,
+                      FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
+                      isDirectory.boolValue,
+                      FileManager.default.isReadableFile(atPath: source.path)
+                else {
+                    throw WorkflowExecutionError.invalidValue("运行输入文件夹不可读：\(source.lastPathComponent)")
+                }
+                let target = assets.appendingPathComponent(
+                    "input-\(UUID().uuidString)-\(source.lastPathComponent)",
+                    isDirectory: true
+                )
+                try FileManager.default.copyItem(at: source, to: target)
+                result[key] = .folder("Assets/\(target.lastPathComponent)")
+                continue
+            }
             guard source.isFileURL,
                   FileManager.default.isReadableFile(atPath: source.path),
                   allowed[value.valueType]?.contains(source.pathExtension.lowercased()) == true
@@ -682,9 +1036,11 @@ final class WorkflowExecutor {
             try FileManager.default.copyItem(at: source, to: target)
             let relative = "Assets/\(target.lastPathComponent)"
             switch value {
+            case .knowledgeCollection: result[key] = value
             case .image: result[key] = .image(relative)
             case .video: result[key] = .video(relative)
             case .audio: result[key] = .audio(relative)
+            case .folder: result[key] = .folder(relative)
             case .text: result[key] = value
             }
         }
@@ -799,4 +1155,11 @@ final class WorkflowExecutor {
         guard let run = store.activeRun, run.id == runID else { return false }
         return !run.warnings.isEmpty || run.nodeRuns.contains { $0.status == .warning }
     }
+}
+
+/// 视觉模型为一张图片整理出的知识资料。
+private struct GeneratedKnowledge {
+    var title: String
+    var content: String
+    var tags: [String]
 }
