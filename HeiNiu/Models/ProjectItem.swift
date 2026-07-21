@@ -53,7 +53,7 @@ enum ProjectStatus: String, Codable, CaseIterable, Identifiable, Hashable {
 /// ## 设计原则
 ///
 /// - **先立项、后拆集**：`targetEpisodeCount` 只是可选预估，不是集数列表。
-/// - **与黑妞独立**：不强制绑定会话；聊天关联留待后续。
+/// - **项目独立**：每个项目维护自己的元数据与流水线产物。
 ///
 /// 持久化：`projects.json`（见 ``AppPaths/projectsFileURL``）。
 ///

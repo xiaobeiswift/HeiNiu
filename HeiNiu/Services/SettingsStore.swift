@@ -1,4 +1,4 @@
-/// 全局设置仓库：服务商、提示词、MCP、备份。
+/// 全局设置仓库：服务商、提示词与备份。
 ///
 /// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
 /// 可在 Xcode 中通过 Product → Build Documentation 浏览。
@@ -12,7 +12,7 @@ import Observation
 ///
 /// | 数据 | 位置 |
 /// |------|------|
-/// | 服务商 / 提示词 / MCP | `settings.json` |
+/// | 服务商 / 提示词 | `settings.json` |
 /// | API Key | 钥匙串（``KeychainHelper``） |
 ///
 /// ## 设计原则
@@ -57,60 +57,6 @@ final class SettingsStore {
     var imageProviders: [ImageProvider] = []
     /// 生视频服务商列表。
     var videoProviders: [VideoProvider] = []
-    /// 全局 MCP 服务器清单。
-    ///
-    /// 黑妞侧通过 ``AgentMCPMode`` 决定是否使用及手动勾选子集。
-    ///
-    /// - SeeAlso: ``addMCPServer(named:)``, ``MCPServer``
-    ///
-    var mcpServers: [MCPServer] = []
-
-    /// 全局翻译用服务商 ID；`nil` 表示未配置，聊天「译英」回退当前黑妞模型。
-    var translationProviderID: UUID?
-    /// 全局翻译用模型 ID；空字符串视为未配置。
-    var translationModel: String = ""
-
-    /// 是否已配置全局翻译模型（服务商 + 非空模型）。
-    var hasTranslationModelConfigured: Bool {
-        guard let translationProviderID,
-              provider(id: translationProviderID) != nil
-        else { return false }
-        return !translationModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// 解析翻译实际使用的服务商与模型。
-    ///
-    /// 优先全局配置；未配置时回退到 `fallbackAgent` 的绑定。
-    ///
-    /// - Parameter fallbackAgent: 当前黑妞；全局未配时使用其 provider/model。
-    /// - Returns: `(provider, model)`；无法解析时返回 `nil`。
-    func resolveTranslationTarget(fallbackAgent: HeiNiuAgent) -> (provider: LLMProvider, model: String)? {
-        let globalModel = translationModel.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let pid = translationProviderID,
-           let provider = provider(id: pid),
-           !globalModel.isEmpty {
-            return (provider, globalModel)
-        }
-
-        guard let pid = fallbackAgent.providerID,
-              let provider = provider(id: pid)
-        else { return nil }
-        let model = fallbackAgent.model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !model.isEmpty else { return nil }
-        return (provider, model)
-    }
-
-    /// 写入全局翻译模型并落盘。
-    func setTranslationModel(providerID: UUID?, model: String) {
-        translationProviderID = providerID
-        translationModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        // 清空服务商时同步清空模型
-        if translationProviderID == nil {
-            translationModel = ""
-        }
-        save()
-    }
-
     /// JSON 编码器（美化输出、ISO8601 日期）。
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
@@ -161,10 +107,6 @@ final class SettingsStore {
     ///
     func deleteProvider(id: UUID) {
         providers.removeAll { $0.id == id }
-        if translationProviderID == id {
-            translationProviderID = nil
-            translationModel = ""
-        }
         KeychainHelper.delete(account: Self.llmKeyAccount(id))
 
         for index in promptItems.indices where promptItems[index].providerID == id {
@@ -253,51 +195,6 @@ final class SettingsStore {
     func videoProvider(id: UUID?) -> VideoProvider? {
         guard let id else { return nil }
         return videoProviders.first { $0.id == id }
-    }
-
-    // MARK: - MCP Servers
-
-    /// 按名称排序的 MCP 服务器。
-    var sortedMCPServers: [MCPServer] {
-        mcpServers.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
-
-    /// 按 ID 查找 MCP 服务器
-    ///
-    /// 按 ID 查找 MCP 服务器。
-    func mcpServer(id: UUID?) -> MCPServer? {
-        guard let id else { return nil }
-        return mcpServers.first { $0.id == id }
-    }
-
-    /// 添加 MCP 服务器
-    ///
-    /// 添加 MCP 服务器。
-    @discardableResult
-    func addMCPServer(named name: String = "新 MCP 服务器") -> MCPServer {
-        let server = MCPServer(name: name)
-        mcpServers.append(server)
-        save()
-        return server
-    }
-
-    /// 更新 MCP 服务器
-    ///
-    /// 更新 MCP 服务器。
-    func updateMCPServer(_ server: MCPServer) {
-        guard let index = mcpServers.firstIndex(where: { $0.id == server.id }) else { return }
-        var updated = server
-        updated.updatedAt = Date()
-        mcpServers[index] = updated
-        save()
-    }
-
-    /// 删除 MCP 服务器
-    ///
-    /// 删除 MCP 服务器。
-    func deleteMCPServer(id: UUID) {
-        mcpServers.removeAll { $0.id == id }
-        save()
     }
 
     // MARK: - API Keys
@@ -563,16 +460,6 @@ final class SettingsStore {
             promptItems = persisted.promptItems
             imageProviders = persisted.imageProviders
             videoProviders = persisted.videoProviders
-            mcpServers = persisted.mcpServers
-            translationProviderID = persisted.translationProviderID
-            translationModel = persisted.translationModel
-
-            // 孤儿绑定：服务商已删则清空翻译配置
-            if let tid = translationProviderID, provider(id: tid) == nil {
-                translationProviderID = nil
-                translationModel = ""
-            }
-
             var needsSave = false
 
             if promptItems.isEmpty {
@@ -621,10 +508,7 @@ final class SettingsStore {
             providers: providers,
             promptItems: promptItems,
             imageProviders: imageProviders,
-            videoProviders: videoProviders,
-            mcpServers: mcpServers,
-            translationProviderID: translationProviderID,
-            translationModel: translationModel
+            videoProviders: videoProviders
         )
         do {
             let data = try encoder.encode(persisted)
@@ -681,9 +565,6 @@ final class SettingsStore {
             promptItems: promptItems,
             imageProviders: imageProviders,
             videoProviders: videoProviders,
-            mcpServers: mcpServers,
-            translationProviderID: translationProviderID,
-            translationModel: translationModel,
             llmAPIKeys: llmKeys,
             imageAPIKeys: imageKeys,
             videoAPIKeys: videoKeys
@@ -732,9 +613,6 @@ final class SettingsStore {
             promptItems = backup.promptItems
             imageProviders = backup.imageProviders
             videoProviders = backup.videoProviders
-            mcpServers = backup.mcpServers
-            translationProviderID = backup.translationProviderID
-            translationModel = backup.translationModel
 
             if importAPIKeys && backup.includeAPIKeys {
                 applyAPIKeys(from: backup)
@@ -745,22 +623,11 @@ final class SettingsStore {
             mergePromptItems(backup.promptItems)
             mergeProviders(backup.imageProviders, into: &imageProviders)
             mergeProviders(backup.videoProviders, into: &videoProviders)
-            mergeProviders(backup.mcpServers, into: &mcpServers)
-            // 合并时：备份有配置则覆盖；否则保留本机
-            if backup.translationProviderID != nil || !backup.translationModel.isEmpty {
-                translationProviderID = backup.translationProviderID
-                translationModel = backup.translationModel
-            }
 
             if importAPIKeys && backup.includeAPIKeys {
                 applyAPIKeys(from: backup)
             }
         }
-        if let tid = translationProviderID, provider(id: tid) == nil {
-            translationProviderID = nil
-            translationModel = ""
-        }
-
         _ = seedMissingBuiltInPrompts()
         save()
     }
@@ -775,9 +642,6 @@ final class SettingsStore {
         promptItems = DefaultPrompts.seedItems()
         imageProviders = []
         videoProviders = []
-        mcpServers = []
-        translationProviderID = nil
-        translationModel = ""
     }
 
     /// 返回是否写入了新项
@@ -1044,13 +908,6 @@ private struct PersistedSettings: Codable {
     var imageProviders: [ImageProvider]
     /// 生视频服务商列表。
     var videoProviders: [VideoProvider]
-    /// 全局 MCP 服务器列表。
-    var mcpServers: [MCPServer]
-    /// 全局翻译服务商。
-    var translationProviderID: UUID?
-    /// 全局翻译模型。
-    var translationModel: String
-
     /// migratedFromLegacyPrompts。
     var migratedFromLegacyPrompts: [PromptItem]?
     /// legacyImageGen。
@@ -1063,18 +920,12 @@ private struct PersistedSettings: Codable {
         providers: [LLMProvider],
         promptItems: [PromptItem],
         imageProviders: [ImageProvider],
-        videoProviders: [VideoProvider],
-        mcpServers: [MCPServer],
-        translationProviderID: UUID? = nil,
-        translationModel: String = ""
+        videoProviders: [VideoProvider]
     ) {
         self.providers = providers
         self.promptItems = promptItems
         self.imageProviders = imageProviders
         self.videoProviders = videoProviders
-        self.mcpServers = mcpServers
-        self.translationProviderID = translationProviderID
-        self.translationModel = translationModel
         self.migratedFromLegacyPrompts = nil
         self.legacyImageGen = nil
     }
@@ -1086,9 +937,6 @@ private struct PersistedSettings: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         providers = try container.decodeIfPresent([LLMProvider].self, forKey: .providers) ?? []
         videoProviders = try container.decodeIfPresent([VideoProvider].self, forKey: .videoProviders) ?? []
-        mcpServers = try container.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
-        translationProviderID = try container.decodeIfPresent(UUID.self, forKey: .translationProviderID)
-        translationModel = try container.decodeIfPresent(String.self, forKey: .translationModel) ?? ""
 
         if let items = try container.decodeIfPresent([ImageProvider].self, forKey: .imageProviders) {
             imageProviders = items
@@ -1122,9 +970,6 @@ private struct PersistedSettings: Codable {
         try container.encode(promptItems, forKey: .promptItems)
         try container.encode(imageProviders, forKey: .imageProviders)
         try container.encode(videoProviders, forKey: .videoProviders)
-        try container.encode(mcpServers, forKey: .mcpServers)
-        try container.encodeIfPresent(translationProviderID, forKey: .translationProviderID)
-        try container.encode(translationModel, forKey: .translationModel)
     }
 
     /// CodingKeys
@@ -1134,8 +979,7 @@ private struct PersistedSettings: Codable {
         /// LLM 服务商列表
         ///
         /// LLM 服务商列表。
-        case providers, promptItems, imageProviders, videoProviders, mcpServers, imageGen, prompts
-        case translationProviderID, translationModel
+        case providers, promptItems, imageProviders, videoProviders, imageGen, prompts
     }
 
     /// migrateLegacyPrompts

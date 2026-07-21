@@ -26,13 +26,6 @@ struct SettingsBackup: Codable {
     var imageProviders: [ImageProvider]
     /// 生视频服务商列表。
     var videoProviders: [VideoProvider]
-    /// 全局 MCP 服务器列表。
-    var mcpServers: [MCPServer]
-    /// 全局翻译服务商。
-    var translationProviderID: UUID?
-    /// 全局翻译模型。
-    var translationModel: String
-
     /// Key 仅在 includeAPIKeys == true 时写入；键为 provider UUID 字符串
     var llmAPIKeys: [String: String]
     /// 生图 Key 字典。
@@ -54,9 +47,6 @@ struct SettingsBackup: Codable {
         promptItems: [PromptItem],
         imageProviders: [ImageProvider],
         videoProviders: [VideoProvider],
-        mcpServers: [MCPServer] = [],
-        translationProviderID: UUID? = nil,
-        translationModel: String = "",
         llmAPIKeys: [String: String] = [:],
         imageAPIKeys: [String: String] = [:],
         videoAPIKeys: [String: String] = [:]
@@ -69,9 +59,6 @@ struct SettingsBackup: Codable {
         self.promptItems = promptItems
         self.imageProviders = imageProviders
         self.videoProviders = videoProviders
-        self.mcpServers = mcpServers
-        self.translationProviderID = translationProviderID
-        self.translationModel = translationModel
         self.llmAPIKeys = llmAPIKeys
         self.imageAPIKeys = imageAPIKeys
         self.videoAPIKeys = videoAPIKeys
@@ -90,9 +77,6 @@ struct SettingsBackup: Codable {
         promptItems = try container.decodeIfPresent([PromptItem].self, forKey: .promptItems) ?? []
         imageProviders = try container.decodeIfPresent([ImageProvider].self, forKey: .imageProviders) ?? []
         videoProviders = try container.decodeIfPresent([VideoProvider].self, forKey: .videoProviders) ?? []
-        mcpServers = try container.decodeIfPresent([MCPServer].self, forKey: .mcpServers) ?? []
-        translationProviderID = try container.decodeIfPresent(UUID.self, forKey: .translationProviderID)
-        translationModel = try container.decodeIfPresent(String.self, forKey: .translationModel) ?? ""
         llmAPIKeys = try container.decodeIfPresent([String: String].self, forKey: .llmAPIKeys) ?? [:]
         imageAPIKeys = try container.decodeIfPresent([String: String].self, forKey: .imageAPIKeys) ?? [:]
         videoAPIKeys = try container.decodeIfPresent([String: String].self, forKey: .videoAPIKeys) ?? [:]
@@ -107,8 +91,7 @@ struct SettingsBackup: Codable {
         /// LLM 服务商列表
         ///
         /// LLM 服务商列表。
-        case providers, promptItems, imageProviders, videoProviders, mcpServers
-        case translationProviderID, translationModel
+        case providers, promptItems, imageProviders, videoProviders
         /// LLM Key 字典。
         case llmAPIKeys, imageAPIKeys, videoAPIKeys
     }

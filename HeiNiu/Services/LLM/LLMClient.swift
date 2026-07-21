@@ -7,7 +7,7 @@ import Foundation
 
 /// LLM 调用错误。
 ///
-/// 用于聊天发送与连通性流程的用户可读失败原因。
+/// 用于创作流水线与连通性流程的用户可读失败原因。
 ///
 /// ## 用例
 ///
@@ -49,7 +49,7 @@ enum LLMError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingAPIKey: "请先配置 API Key"
-        case .missingProvider: "请先为该黑妞绑定服务商"
+        case .missingProvider: "请先绑定服务商"
         case .missingModel: "请先选择或填写模型"
         case .invalidURL: "Base URL 无效"
         case .http(let code, let body): "HTTP \(code)：\(body.prefix(240))"
@@ -60,9 +60,29 @@ enum LLMError: LocalizedError {
     }
 }
 
-/// 发往模型的单条消息。
+/// 模型思考 / 推理强度。
 ///
-/// 与 UI 层 ``ChatTurn`` 分离，便于在发送前重写 system/user 内容。
+/// 对支持 reasoning 的模型或兼容网关生效；``none`` 不写入相关字段。
+enum ReasoningEffort: String, Codable, CaseIterable, Identifiable, Hashable {
+    case none
+    case low
+    case medium
+    case high
+
+    var id: String { rawValue }
+
+    /// 写入 API 的 effort 字符串；``none`` 为 `nil`。
+    var apiValue: String? {
+        switch self {
+        case .none: nil
+        case .low: "low"
+        case .medium: "medium"
+        case .high: "high"
+        }
+    }
+}
+
+/// 发往模型的单条消息。
 ///
 struct LLMChatMessage: Hashable, Sendable {
     /// Role

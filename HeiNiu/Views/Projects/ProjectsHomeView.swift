@@ -29,10 +29,6 @@ private enum ProjectHomeFilter: String, CaseIterable, Identifiable {
 /// 点卡片进入详情；v1 无集数实体。
 struct ProjectsHomeView: View {
     @Environment(ProjectStore.self) private var projects
-    @Environment(HeiNiuAgentStore.self) private var agents
-
-    /// 侧栏跳到某位黑妞（可选）。
-    var onOpenAgent: ((UUID) -> Void)? = nil
 
     @State private var selectedID: UUID?
     @State private var filter: ProjectHomeFilter = .all
@@ -105,7 +101,7 @@ struct ProjectsHomeView: View {
             }
             Button("取消", role: .cancel) { pendingDelete = nil }
         } message: {
-            Text("仅删除项目记录，不会影响黑妞对话。")
+            Text("项目记录及其本地流水线数据会一并删除。")
         }
     }
 
@@ -462,11 +458,6 @@ struct ProjectsHomeView: View {
                             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                         }
                     }
-                    if let onOpenAgent, let writer = preferredWriterAgent() {
-                        Button("用「\(writer.name)」聊聊") {
-                            onOpenAgent(writer.id)
-                        }
-                    }
                 } label: {
                     Image(systemName: "ellipsis.circle")
                         .font(.title3)
@@ -540,14 +531,6 @@ struct ProjectsHomeView: View {
         var updated = project
         updated.status = status
         projects.updateProject(updated)
-    }
-
-    private func preferredWriterAgent() -> HeiNiuAgent? {
-        let list = agents.sortedAgents
-        if let named = list.first(where: { $0.name.contains("编剧") }) {
-            return named
-        }
-        return list.first
     }
 
     private func statusStyle(_ status: ProjectStatus) -> StatusBadge.Style {

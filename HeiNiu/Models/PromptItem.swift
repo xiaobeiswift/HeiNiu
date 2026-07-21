@@ -9,7 +9,7 @@ import Foundation
 ///
 /// 按 ``PromptCategory`` 分组；可绑定 LLM 服务商与模型。
 ///
-/// - Note: 与黑妞「技能」不同：提示词库面向创作流水线槽位，技能面向聊天 `$命令`。
+/// - Note: 提示词库条目用于创作流水线的不同阶段。
 struct PromptItem: Identifiable, Codable, Hashable {
     /// 唯一 ID。
     var id: UUID

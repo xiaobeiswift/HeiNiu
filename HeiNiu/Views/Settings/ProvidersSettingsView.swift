@@ -39,8 +39,6 @@ struct ProvidersSettingsView: View {
                 .buttonStyle(.plain)
             }
 
-            translationModelCard
-
             if settings.providers.isEmpty {
                 StudioCard {
                     EmptyStateView(
@@ -106,97 +104,6 @@ struct ProvidersSettingsView: View {
         onSaved()
     }
 
-    /// 全局「译英」模型：未配置时聊天区回退黑妞自己的模型。
-    private var translationModelCard: some View {
-        StudioCard(title: "翻译模型（译英）", subtitle: "聊天输入区「译英」优先用这里；留空则用当前黑妞的模型。") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    Text("服务商")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(AppTheme.textSecondary)
-                        .frame(width: 56, alignment: .leading)
-                    Picker("服务商", selection: translationProviderBinding) {
-                        Text("未配置（用黑妞模型）").tag(Optional<UUID>.none)
-                        ForEach(settings.providers) { p in
-                            Text(p.name).tag(Optional(p.id))
-                        }
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                HStack(spacing: 12) {
-                    Text("模型")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(AppTheme.textSecondary)
-                        .frame(width: 56, alignment: .leading)
-
-                    if let provider = settings.provider(id: settings.translationProviderID),
-                       !provider.models.isEmpty {
-                        Picker("模型", selection: translationModelBinding) {
-                            Text("请选择").tag("")
-                            ForEach(provider.models, id: \.self) { m in
-                                Text(m).tag(m)
-                            }
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        TextField(
-                            settings.translationProviderID == nil ? "先选服务商，或留空回退黑妞" : "模型 ID",
-                            text: translationModelBinding
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        .disabled(settings.translationProviderID == nil)
-                    }
-                }
-
-                if settings.hasTranslationModelConfigured {
-                    let name = settings.provider(id: settings.translationProviderID)?.name ?? "—"
-                    Text("当前：\(name) · \(settings.translationModel)")
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.textTertiary)
-                } else {
-                    Text("未配置全局翻译模型时，「译英」使用当前黑妞绑定的服务商与模型。")
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.textTertiary)
-                }
-            }
-        }
-    }
-
-    private var translationProviderBinding: Binding<UUID?> {
-        Binding(
-            get: { settings.translationProviderID },
-            set: { newID in
-                var model = settings.translationModel
-                if let newID, let provider = settings.provider(id: newID) {
-                    if model.isEmpty || !provider.models.contains(model) {
-                        model = provider.models.first ?? ""
-                    }
-                } else {
-                    model = ""
-                }
-                settings.setTranslationModel(providerID: newID, model: model)
-                onSaved()
-            }
-        )
-    }
-
-    private var translationModelBinding: Binding<String> {
-        Binding(
-            get: { settings.translationModel },
-            set: { newModel in
-                settings.setTranslationModel(
-                    providerID: settings.translationProviderID,
-                    model: newModel
-                )
-                onSaved()
-            }
-        )
-    }
 }
 
 // MARK: - Card

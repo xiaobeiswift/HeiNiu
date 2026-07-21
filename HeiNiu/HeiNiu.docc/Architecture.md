@@ -4,40 +4,33 @@
 
 ## 分层
 
-```
+```text
 HeiNiuApp
   └─ MainView（侧栏导航）
-       ├─ 工作台：黑妞 / 学习 / 剧本 / 分镜 / 资产库
-       └─ 配置：设置 / 技能 / MCP
+       ├─ 工作台：项目 / 剧本 / 分镜 / 资产库
+       └─ 配置：设置
 ```
 
 ### 状态与依赖注入
 
-应用入口创建两个 `@Observable` 主仓库，并通过 `.environment` 注入：
+应用入口创建两个 `@Observable` 主仓库并通过 `.environment` 注入：
 
-- ``SettingsStore``：LLM / 生图 / 生视频服务商、提示词库、MCP、备份
-- ``HeiNiuAgentStore``：黑妞角色、对话、知识库、技能与插件
+- ``SettingsStore``：LLM、生图、生视频服务商、提示词库与备份
+- ``ProjectStore``：项目列表与项目流水线状态
 
-视图只读环境对象，不直接访问磁盘路径。
+视图通过仓库访问状态，不直接维护持久化格式。
 
 ### LLM 调用链
 
-1. 黑妞绑定 ``LLMProvider`` + 模型  
-2. ``LLMClientFactory`` 按协议创建客户端  
-3. OpenAI 兼容（Chat Completions / Responses）或 Anthropic  
-4. API Key 仅来自钥匙串，不进 JSON  
-
-### 聊天上下文组装
-
-发送消息时，``HeiNiuAgentStore/send(package:conversationID:settings:activeSkillIDs:)`` 会组装：
-
-- 系统提示：黑妞指令 + 启用知识库  
-- 用户侧：正文 / 命令模板 / 技能模板 + 附件 + 插入会话  
-- 上下文占用：``ContextEstimator`` 按字符粗算并分桶展示  
+1. 流水线步骤选择 ``PromptItem`` 及其服务商和模型
+2. ``ProjectPipelineRunner`` 组装系统提示与用户输入
+3. ``LLMClientFactory`` 按协议创建 OpenAI 兼容或 Anthropic 客户端
+4. 返回文本写入项目的 `pipeline.json`
+5. API Key 只从钥匙串读取，不进入配置 JSON
 
 ## 设计原则
 
-- **密钥与配置分离**：配置进 `settings.json`，Key 进 Keychain  
-- **容错解码**：模型字段新增时用 `decodeIfPresent` 默认值，避免冲掉用户数据  
-- **中文 UI**：产品文案与文档注释均使用中文  
-- **沙盒关闭**：便于本机 CLI / MCP stdio（不计划上架 App Store 时）  
+- **项目驱动**：AI 生成属于明确的项目步骤，不形成开放式聊天会话
+- **密钥与配置分离**：配置进 `settings.json`，Key 进 Keychain
+- **容错解码**：新增模型字段使用 `decodeIfPresent` 默认值
+- **中文 UI**：产品文案与文档注释均使用中文

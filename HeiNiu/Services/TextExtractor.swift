@@ -1,4 +1,4 @@
-/// 从本地文件抽取可注入上下文的文本。
+/// 从本地文件抽取可用于创作流水线的文本。
 ///
 /// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
 /// 可在 Xcode 中通过 Product → Build Documentation 浏览。
@@ -6,25 +6,18 @@
 import Foundation
 import UniformTypeIdentifiers
 
-/// 从本地文件抽取可注入上下文的文本。
+/// 从本地文件抽取文本。
 enum TextExtractor {
     /// 抽取结果。
     struct Result: Sendable {
-        /// 正文或说明。
         var text: String
-        /// 文件字节数。
         var byteSize: Int
-        /// MIME 提示。
         var mime: String
-        /// 是否成功读到可用正文（非占位说明）。
         var didExtractContent: Bool
-        /// 失败原因（如有）。
         var errorMessage: String?
     }
 
-    /// 从本地文件抽取可注入上下文的文本；不支持的类型返回文件名说明。
-    ///
-    /// 会尝试 `startAccessingSecurityScopedResource()`，适配面板/拖放路径。
+    /// 从本地文件抽取文本；不支持的类型返回文件名说明。
     static func extract(from url: URL, maxCharacters: Int = 80_000) -> (text: String, byteSize: Int, mime: String) {
         let result = extractDetailed(from: url, maxCharacters: maxCharacters)
         return (result.text, result.byteSize, result.mime)
@@ -81,7 +74,6 @@ enum TextExtractor {
                     errorMessage: nil
                 )
             }
-            // 文本类扩展但读失败：仍给出明确错误
             if textExtensions.contains(ext) {
                 return Result(
                     text: "【无法读取文本文件：\(name)。请确认有权限访问，或复制正文粘贴。】",
@@ -98,11 +90,10 @@ enum TextExtractor {
             return Result(text: note, byteSize: size, mime: "application/pdf", didExtractContent: false, errorMessage: "PDF 暂不解析")
         }
         if type?.conforms(to: .image) == true {
-            let note = "【图片：\(name)。当前以文本上下文为主，请补充画面描述。】"
+            let note = "【图片：\(name)。当前以文本输入为主，请补充画面描述。】"
             return Result(text: note, byteSize: size, mime: mime, didExtractContent: false, errorMessage: "图片暂不 OCR")
         }
 
-        // 未知类型：再盲读一次，很多无扩展名/冷门扩展其实是 UTF-8 文本
         if let raw = readText(from: standardized), isMostlyPrintable(raw) {
             return Result(
                 text: truncate(raw, max: maxCharacters),
@@ -113,7 +104,7 @@ enum TextExtractor {
             )
         }
 
-        let note = "【已附加文件：\(name)（\(ext.isEmpty ? "未知类型" : ext)，\(size) 字节）。未能自动抽取正文，请复制内容粘贴。】"
+        let note = "【已选择文件：\(name)（\(ext.isEmpty ? "未知类型" : ext)，\(size) 字节）。未能自动抽取正文，请复制内容粘贴。】"
         return Result(text: note, byteSize: size, mime: mime, didExtractContent: false, errorMessage: "无法抽取正文")
     }
 
@@ -128,17 +119,15 @@ enum TextExtractor {
             return url
         }
 
-        // 绝对路径：/Users/... 或 /Volumes/...
         if trimmed.hasPrefix("/") {
             let url = URL(fileURLWithPath: trimmed)
             if FileManager.default.fileExists(atPath: url.path) {
                 return url
             }
-            // 去掉可能的包裹引号
             let unquoted = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
             if unquoted != trimmed {
-                let u = URL(fileURLWithPath: unquoted)
-                if FileManager.default.fileExists(atPath: u.path) { return u }
+                let url = URL(fileURLWithPath: unquoted)
+                if FileManager.default.fileExists(atPath: url.path) { return url }
             }
         }
         return nil
@@ -147,18 +136,15 @@ enum TextExtractor {
     /// 截断过长文本。
     static func truncate(_ text: String, max: Int) -> String {
         guard text.count > max else { return text }
-        let idx = text.index(text.startIndex, offsetBy: max)
-        return String(text[..<idx]) + "\n\n…（已截断，原长度 \(text.count) 字符）"
+        let index = text.index(text.startIndex, offsetBy: max)
+        return String(text[..<index]) + "\n\n…（已截断，原长度 \(text.count) 字符）"
     }
-
-    // MARK: - Private
 
     private static func readText(from url: URL) -> String? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
         if let utf16 = String(data: data, encoding: .utf16) { return utf16 }
         if let latin1 = String(data: data, encoding: .isoLatin1) { return latin1 }
-        // 尽量用 lossy UTF-8
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -166,8 +152,9 @@ enum TextExtractor {
         let sample = text.prefix(4000)
         guard !sample.isEmpty else { return false }
         var bad = 0
-        for ch in sample {
-            if ch == "\u{FFFD}" || (ch.unicodeScalars.count == 1 && ch.unicodeScalars.first!.value < 9) {
+        for character in sample {
+            if character == "\u{FFFD}"
+                || (character.unicodeScalars.count == 1 && character.unicodeScalars.first!.value < 9) {
                 bad += 1
             }
         }
