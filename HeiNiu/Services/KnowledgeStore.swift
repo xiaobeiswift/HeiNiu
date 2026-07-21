@@ -287,6 +287,71 @@ final class KnowledgeStore {
         return vectors.first?.count ?? 0
     }
 
+    // MARK: - Retrieval
+
+    /// 为工作流执行一次向量检索。
+    ///
+    /// - Parameters:
+    ///   - query: 语义查询文本。
+    ///   - settings: 嵌入服务配置与钥匙串入口。
+    ///   - collectionID: 可选知识集合。
+    ///   - tags: 资料必须同时包含的标签。
+    ///   - limit: 返回数量，限制为 1...20。
+    /// - Returns: 按余弦相似度从高到低排序的片段。
+    func search(
+        query: String,
+        settings: SettingsStore,
+        collectionID: UUID?,
+        tags: [String],
+        limit: Int
+    ) async throws -> [KnowledgeSearchResult] {
+        let cleanQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanQuery.isEmpty else { throw LLMError.underlying("知识检索查询不能为空") }
+        guard let database else { throw KnowledgeDatabaseError.open("数据库不可用") }
+        let target = try embeddingTarget(settings: settings)
+        let vectors = try await OpenAIEmbeddingClient.embed(
+            inputs: [cleanQuery],
+            provider: target.provider,
+            model: target.model,
+            apiKey: target.apiKey,
+            apiMode: target.apiMode
+        )
+        guard let queryVector = vectors.first, !queryVector.isEmpty else {
+            throw LLMError.underlying("查询嵌入结果为空")
+        }
+
+        let normalizedTags = Set(tags.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        let candidates = documents.filter { document in
+            guard document.indexStatus == .ready,
+                  document.embeddingFingerprint == target.fingerprint
+            else { return false }
+            if let collectionID, document.collectionID != collectionID { return false }
+            return normalizedTags.isSubset(of: Set(document.tags))
+        }
+        guard !candidates.isEmpty else {
+            throw LLMError.underlying("筛选范围内没有使用当前嵌入配置完成索引的资料")
+        }
+        let byID = Dictionary(uniqueKeysWithValues: candidates.map { ($0.id, $0) })
+        let chunks = try database.loadChunks(
+            documentIDs: Set(candidates.map(\.id)),
+            fingerprint: target.fingerprint
+        )
+        let result = chunks.compactMap { chunk -> KnowledgeSearchResult? in
+            guard let document = byID[chunk.documentID],
+                  chunk.vector.count == queryVector.count
+            else { return nil }
+            return KnowledgeSearchResult(
+                chunkID: chunk.id,
+                documentID: document.id,
+                documentTitle: document.title,
+                ordinal: chunk.ordinal,
+                text: chunk.text,
+                score: Self.cosineSimilarity(queryVector, chunk.vector)
+            )
+        }
+        return Array(result.sorted { $0.score > $1.score }.prefix(max(1, min(20, limit))))
+    }
+
     // MARK: - Archive
 
     func exportArchive(to destination: URL, settings: SettingsStore) throws {
@@ -440,6 +505,22 @@ final class KnowledgeStore {
 
     nonisolated private static func sha256(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    nonisolated private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Double {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return -1 }
+        var dot: Double = 0
+        var lhsNorm: Double = 0
+        var rhsNorm: Double = 0
+        for index in lhs.indices {
+            let a = Double(lhs[index])
+            let b = Double(rhs[index])
+            dot += a * b
+            lhsNorm += a * a
+            rhsNorm += b * b
+        }
+        let denominator = sqrt(lhsNorm) * sqrt(rhsNorm)
+        return denominator > 0 ? dot / denominator : -1
     }
 
     nonisolated private static func chunkText(_ text: String, target: Int = 1_000, overlap: Int = 150) -> [String] {

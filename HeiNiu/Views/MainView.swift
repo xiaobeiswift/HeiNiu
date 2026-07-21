@@ -7,6 +7,8 @@ import SwiftUI
 
 /// 侧栏一级模块。
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
+    /// 节点式工作流。
+    case workflows
     /// 剧本。
     case scripts
     /// 分镜。
@@ -22,6 +24,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     /// 标题。
     var title: String {
         switch self {
+        case .workflows: "工作流"
         case .scripts: "剧本"
         case .storyboards: "分镜"
         case .knowledge: "知识库"
@@ -32,6 +35,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     /// 用于 UI 的 SF Symbol。
     var systemImage: String {
         switch self {
+        case .workflows: "point.3.connected.trianglepath.dotted"
         case .scripts: "doc.text"
         case .storyboards: "rectangle.split.3x1"
         case .knowledge: "books.vertical"
@@ -40,7 +44,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     }
 
     /// 工作台模块。
-    static let workspaceItems: [SidebarItem] = [.knowledge, .scripts, .storyboards]
+    static let workspaceItems: [SidebarItem] = [.knowledge, .workflows, .scripts, .storyboards]
 }
 
 /// 主窗口：工作台导航与详情。
@@ -132,6 +136,8 @@ struct MainView: View {
     @ViewBuilder
     private var detailView: some View {
         switch selection {
+        case .workflows:
+            WorkflowHomeView()
         case .scripts:
             PlaceholderView(
                 title: "剧本",
@@ -160,5 +166,6 @@ struct MainView: View {
     MainView()
         .environment(SettingsStore())
         .environment(KnowledgeStore())
+        .environment(WorkflowStore())
         .frame(width: 1180, height: 760)
 }

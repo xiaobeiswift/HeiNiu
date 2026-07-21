@@ -15,6 +15,13 @@ enum ImageProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
     /// 唯一标识符。
     var id: String { rawValue }
 
+    /// 对应源码适配器的稳定 ID。
+    var adapterID: String {
+        switch self {
+        case .openAIImages: ImageProvider.openAIAdapterID
+        }
+    }
+
     /// 界面显示名称。
     var displayName: String {
         switch self {
@@ -25,7 +32,7 @@ enum ImageProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
     /// 接口说明文案。
     var endpointHint: String {
         switch self {
-        case .openAIImages: "POST /images/generations"
+        case .openAIImages: "POST /images/generations · POST /images/edits"
         }
     }
 
@@ -46,12 +53,18 @@ enum ImageProviderKind: String, Codable, CaseIterable, Identifiable, Hashable {
 
 /// 一家生图服务商（可配置多家）
 struct ImageProvider: Identifiable, Codable, Hashable {
+    /// 内置 OpenAI Images 源码适配器 ID。
+    static let openAIAdapterID = "openai.images.v1"
     /// 唯一标识符。
     var id: UUID
     /// 显示名称。
     var name: String
     /// 类型枚举。
     var kind: ImageProviderKind
+    /// 执行请求时解析源码适配器的稳定 ID。
+    var adapterID: String
+    /// 由特定适配器解释的额外配置，不包含密钥。
+    var adapterSettings: [String: String]
     /// API 根地址。
     var baseURL: String
     /// 模型 ID 列表。
@@ -69,6 +82,8 @@ struct ImageProvider: Identifiable, Codable, Hashable {
         id: UUID = UUID(),
         name: String,
         kind: ImageProviderKind = .openAIImages,
+        adapterID: String? = nil,
+        adapterSettings: [String: String] = [:],
         baseURL: String? = nil,
         models: [String]? = nil,
         defaultSize: String = ImageProvider.defaultSize
@@ -76,6 +91,8 @@ struct ImageProvider: Identifiable, Codable, Hashable {
         self.id = id
         self.name = name
         self.kind = kind
+        self.adapterID = adapterID ?? kind.adapterID
+        self.adapterSettings = adapterSettings
         self.baseURL = baseURL ?? kind.defaultBaseURL
         self.models = models ?? kind.defaultModels
         self.defaultSize = defaultSize
@@ -96,6 +113,8 @@ struct ImageProvider: Identifiable, Codable, Hashable {
         id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         name = try container.decodeIfPresent(String.self, forKey: .name) ?? "未命名生图服务商"
         kind = try container.decodeIfPresent(ImageProviderKind.self, forKey: .kind) ?? .openAIImages
+        adapterID = try container.decodeIfPresent(String.self, forKey: .adapterID) ?? kind.adapterID
+        adapterSettings = try container.decodeIfPresent([String: String].self, forKey: .adapterSettings) ?? [:]
         baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? kind.defaultBaseURL
         models = try container.decodeIfPresent([String].self, forKey: .models) ?? kind.defaultModels
         // 兼容旧字段 size
@@ -116,6 +135,8 @@ struct ImageProvider: Identifiable, Codable, Hashable {
         try container.encode(id, forKey: .id)
         try container.encode(name, forKey: .name)
         try container.encode(kind, forKey: .kind)
+        try container.encode(adapterID, forKey: .adapterID)
+        try container.encode(adapterSettings, forKey: .adapterSettings)
         try container.encode(baseURL, forKey: .baseURL)
         try container.encode(models, forKey: .models)
         try container.encode(defaultSize, forKey: .defaultSize)
@@ -126,6 +147,6 @@ struct ImageProvider: Identifiable, Codable, Hashable {
     /// `CodingKeys` 类型定义。
     private enum CodingKeys: String, CodingKey {
         /// 唯一标识符。
-        case id, name, kind, baseURL, models, defaultSize, size
+        case id, name, kind, adapterID, adapterSettings, baseURL, models, defaultSize, size
     }
 }

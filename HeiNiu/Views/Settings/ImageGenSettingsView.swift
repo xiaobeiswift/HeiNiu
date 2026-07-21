@@ -158,6 +158,16 @@ private struct ImageProviderCard: View {
         !settings.imageAPIKey(for: provider.id).isEmpty || !apiKey.isEmpty
     }
 
+    /// 当前源码适配器公开的能力说明。
+    private var adapterDescriptor: MediaAdapterDescriptor? {
+        MediaAdapterRegistry.shared.imageAdapter(id: draft.adapterID)?.descriptor
+    }
+
+    /// 即使旧配置指向未注册适配器，也保留其稳定 ID 供用户诊断。
+    private var adapterDisplayName: String {
+        adapterDescriptor?.displayName ?? "未注册适配器"
+    }
+
     /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -204,7 +214,7 @@ private struct ImageProviderCard: View {
                 Text(draft.name.isEmpty ? "未命名生图服务商" : draft.name)
                     .font(.headline)
                 HStack(spacing: 8) {
-                    StatusBadge(text: draft.kind.displayName, style: .accent, systemImage: "photo")
+                    StatusBadge(text: adapterDisplayName, style: .accent, systemImage: "photo")
                     StatusBadge(text: "\(draft.models.count) 模型", style: .neutral)
                     StatusBadge(text: draft.defaultSize, style: .neutral)
                     HStack(spacing: 5) {
@@ -239,15 +249,34 @@ private struct ImageProviderCard: View {
                 StudioTextField(title: "名称", text: $draft.name, placeholder: "例如：OpenAI / 第三方网关")
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("类型")
+                    Text("源码适配器")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(AppTheme.textSecondary)
-                    HStack(spacing: 8) {
-                        StatusBadge(text: draft.kind.displayName, style: .accent)
-                        Text(draft.kind.endpointHint)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(AppTheme.textTertiary)
+                    Picker("源码适配器", selection: $draft.adapterID) {
+                        ForEach(MediaAdapterRegistry.shared.imageDescriptors) { descriptor in
+                            Text(descriptor.displayName).tag(descriptor.id)
+                        }
+                        if adapterDescriptor == nil {
+                            Text("未注册：\(draft.adapterID)").tag(draft.adapterID)
+                        }
                     }
+                    .labelsHidden()
+                    .onChange(of: draft.adapterID) { _, newValue in
+                        guard let descriptor = MediaAdapterRegistry.shared.imageAdapter(id: newValue)?.descriptor else { return }
+                        if newValue == ImageProvider.openAIAdapterID {
+                            draft.kind = .openAIImages
+                            if draft.baseURL.isEmpty { draft.baseURL = draft.kind.defaultBaseURL }
+                            if draft.models.isEmpty { draft.models = draft.kind.defaultModels }
+                        }
+                        if !descriptor.supportedSizes.contains(draft.defaultSize),
+                           let first = descriptor.supportedSizes.first {
+                            draft.defaultSize = first
+                        }
+                    }
+
+                    Text(adapterDescriptor?.endpointHint ?? "适配器 \(draft.adapterID) 未在当前版本注册，因此不能执行。")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(adapterDescriptor == nil ? AppTheme.danger : AppTheme.textTertiary)
                 }
             }
 
@@ -264,7 +293,10 @@ private struct ImageProviderCard: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 SectionHeader("默认尺寸")
-                ChipSelector(items: ImageProvider.availableSizes, selection: $draft.defaultSize)
+                ChipSelector(
+                    items: adapterDescriptor?.supportedSizes ?? ImageProvider.availableSizes,
+                    selection: $draft.defaultSize
+                )
             }
 
             HStack(spacing: 12) {
@@ -286,7 +318,8 @@ private struct ImageProviderCard: View {
                     .overlay(Capsule().stroke(AppTheme.strokeStrong, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .disabled(isTesting)
+                .disabled(isTesting || adapterDescriptor == nil)
+                .help(adapterDescriptor == nil ? "当前源码适配器未注册，不能测试连接" : "使用当前配置测试媒体接口")
 
                 if let testMessage {
                     Label(testMessage, systemImage: testOK == true ? "checkmark.circle.fill" : "xmark.circle.fill")

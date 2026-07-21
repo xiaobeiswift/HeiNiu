@@ -31,3 +31,6 @@
 
 - ``ImageProvider`` / ``VideoProvider`` 多家配置  
 - 文案模板在提示词库对应分类，不在接口页重复维护  
+- 服务商保存稳定 `adapterID` 与扩展配置；旧 `kind` 自动映射到内置适配器
+- ``MediaAdapterRegistry`` 只注册随应用编译的适配器，不加载外部二进制或 JSON 插件
+- 内置 OpenAI Images `/images/generations` 与 `/images/edits`，以及 OpenAI Videos `/videos`；未知适配器保留配置并明确显示不可执行原因

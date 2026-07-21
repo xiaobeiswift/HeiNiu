@@ -11,6 +11,9 @@
 | `settings.json` | 服务商、提示词及生图/生视频配置 |
 | `KnowledgeBase/knowledge.sqlite` | 集合、标签、正文、分块与 Float32 向量 |
 | `KnowledgeBase/Files/<documentID>/...` | 导入原文件的本地副本 |
+| `Workflows/workflows.json` | 带格式版本的全局工作流定义 |
+| `Workflows/Runs/<workflowID>/<runID>/run.json` | 一次运行的状态、节点文本、警告与错误 |
+| `Workflows/Runs/<workflowID>/<runID>/Assets/` | 本次运行下载的图片与视频 |
 
 历史版本可能留下 `projects.json`、`Projects/`、智能体相关文件和 `Knowledge/` 目录；当前版本不再读取或写入这些数据，也不会主动删除。当前知识库使用名称不同的 `KnowledgeBase/` 目录。
 
@@ -25,11 +28,13 @@ API Key 永不写入普通配置 JSON。
 
 ## 备份
 
-设置 → 备份支持导出 JSON、合并或替换导入。备份格式版本 3 包含知识库嵌入服务商、模型和接口类型，但不包含 API Key、知识正文、向量或原文件。旧版含 Key 备份仍可兼容导入；新版不再导出 Key。仅拷贝 `settings.json` 不会带走钥匙串密钥。
+设置 → 备份支持导出 JSON、合并或替换导入。备份格式版本 3 包含知识库嵌入服务商、模型和接口类型，但不包含 API Key、知识正文、向量、原文件、工作流或运行媒体。旧版含 Key 备份仍可兼容导入；新版不再导出 Key。仅拷贝 `settings.json` 不会带走钥匙串密钥。
 
 知识库页面使用独立 `.heiniukb` ZIP 归档，包含版本清单、SQLite 快照和 `Files/`。导入可合并或替换；嵌入模型指纹一致时保留向量，不一致时资料保留并标记为待重建。归档不包含 API Key。
 
 删除集合会保留其资料并将资料移入“未分类”；删除资料会移除正文、分块、向量及对应原文件副本。
+
+工作流定义以 400ms 防抖保存，并通过同目录临时文件替换实现原子写入。运行历史不会自动清理；可删除单次历史、清空某工作流历史，或在确认删除工作流时一并删除。复制工作流只复制定义。
 
 ## 解码原则
 

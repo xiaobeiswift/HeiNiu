@@ -1,0 +1,435 @@
+/// 工作流模板、画布状态和完整运行历史的本地仓库。
+
+import Foundation
+import Observation
+
+/// 工作流持久化或编辑错误。
+enum WorkflowStoreError: LocalizedError {
+    case missingWorkflow
+    case missingNode
+    case invalidConnection(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingWorkflow: "工作流不存在"
+        case .missingNode: "节点不存在"
+        case .invalidConnection(let message): message
+        }
+    }
+}
+
+/// 全局工作流仓库。
+@Observable
+@MainActor
+final class WorkflowStore {
+    /// 全部可复用工作流模板。
+    var workflows: [WorkflowDefinition] = []
+    /// 按工作流分组的运行历史，最新记录在前。
+    var runsByWorkflowID: [UUID: [WorkflowRun]] = [:]
+    /// 当前正在执行或刚完成的运行。
+    var activeRun: WorkflowRun?
+    /// 最近一次可展示错误。
+    var lastError: String?
+
+    @ObservationIgnored private let debouncer = DebouncedAction()
+    @ObservationIgnored private let definitionsURL: URL
+    @ObservationIgnored private let runsRootURL: URL
+    @ObservationIgnored private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return encoder
+    }()
+    @ObservationIgnored private let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return decoder
+    }()
+
+    /// 加载模板；首次启动创建一个可编辑的入门模板。
+    ///
+    /// - Parameter rootURL: 测试可注入隔离目录；生产环境默认使用 `Application Support/HeiNiu/Workflows`。
+    init(rootURL: URL? = nil) {
+        let resolvedRoot = rootURL ?? AppPaths.workflowsRoot
+        definitionsURL = resolvedRoot.appendingPathComponent("workflows.json", isDirectory: false)
+        runsRootURL = resolvedRoot.appendingPathComponent("Runs", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: resolvedRoot, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: runsRootURL, withIntermediateDirectories: true)
+        } catch {
+            lastError = error.localizedDescription
+        }
+        loadDefinitions()
+    }
+
+    /// 按 ID 查找工作流。
+    func workflow(id: UUID?) -> WorkflowDefinition? {
+        guard let id else { return nil }
+        return workflows.first { $0.id == id }
+    }
+
+    /// 新建空白工作流。
+    @discardableResult
+    func addWorkflow(named name: String = "新工作流") -> UUID {
+        let uniqueName = availableName(base: name)
+        let item = WorkflowDefinition(name: uniqueName)
+        workflows.append(item)
+        scheduleSave()
+        return item.id
+    }
+
+    /// 新建带入门节点的工作流。
+    @discardableResult
+    func addStarterWorkflow() -> UUID {
+        var item = WorkflowDefinition.starter(named: availableName(base: "短剧创作入门"))
+        item.updatedAt = Date()
+        workflows.append(item)
+        scheduleSave()
+        return item.id
+    }
+
+    /// 重命名工作流。
+    func renameWorkflow(id: UUID, name: String) {
+        guard let index = workflows.firstIndex(where: { $0.id == id }) else { return }
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        workflows[index].name = clean
+        workflows[index].updatedAt = Date()
+        scheduleSave()
+    }
+
+    /// 复制定义但不复制运行历史。
+    @discardableResult
+    func duplicateWorkflow(id: UUID) -> UUID? {
+        guard let source = workflow(id: id) else { return nil }
+        let newID = UUID()
+        let nodeMap = Dictionary(uniqueKeysWithValues: source.nodes.map { ($0.id, UUID()) })
+        let nodes = source.nodes.map { node -> WorkflowNode in
+            var copy = node
+            copy.id = nodeMap[node.id]!
+            copy.createdAt = Date()
+            return copy
+        }
+        let connections = source.connections.compactMap { connection -> WorkflowConnection? in
+            guard let sourceID = nodeMap[connection.sourceNodeID],
+                  let targetID = nodeMap[connection.targetNodeID]
+            else { return nil }
+            return WorkflowConnection(
+                sourceNodeID: sourceID,
+                sourcePortID: connection.sourcePortID,
+                targetNodeID: targetID,
+                targetPortID: connection.targetPortID
+            )
+        }
+        let copy = WorkflowDefinition(
+            id: newID,
+            name: availableName(base: source.name + " 副本"),
+            nodes: nodes,
+            connections: connections,
+            viewport: source.viewport
+        )
+        workflows.append(copy)
+        scheduleSave()
+        return newID
+    }
+
+    /// 删除工作流及其全部运行历史和媒体。
+    func deleteWorkflow(id: UUID) {
+        workflows.removeAll { $0.id == id }
+        runsByWorkflowID[id] = nil
+        if activeRun?.workflowID == id { activeRun = nil }
+        let directory = runsRootURL.appendingPathComponent(id.uuidString, isDirectory: true)
+        do {
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try FileManager.default.removeItem(at: directory)
+            }
+        } catch {
+            lastError = error.localizedDescription
+        }
+        scheduleSave()
+    }
+
+    /// 用一份完整的新定义替换工作流。
+    func updateWorkflow(_ workflow: WorkflowDefinition) {
+        guard let index = workflows.firstIndex(where: { $0.id == workflow.id }) else { return }
+        var updated = workflow
+        updated.updatedAt = Date()
+        workflows[index] = updated
+        scheduleSave()
+    }
+
+    /// 修改工作流定义并自动保存。
+    func mutateWorkflow(id: UUID, _ mutation: (inout WorkflowDefinition) -> Void) {
+        guard let index = workflows.firstIndex(where: { $0.id == id }) else { return }
+        mutation(&workflows[index])
+        workflows[index].updatedAt = Date()
+        scheduleSave()
+    }
+
+    /// 添加节点并返回 ID。
+    @discardableResult
+    func addNode(kind: WorkflowNodeKind, to workflowID: UUID, at position: WorkflowPoint) -> UUID? {
+        guard let index = workflows.firstIndex(where: { $0.id == workflowID }) else { return nil }
+        var configuration = WorkflowNodeConfiguration()
+        switch kind {
+        case .runtimeInput:
+            configuration.parameterName = "输入 \(workflows[index].nodes.filter { $0.kind == .runtimeInput }.count + 1)"
+        case .promptTemplate:
+            configuration.text = "请处理以下内容：\n\n{{input}}"
+        case .llm:
+            configuration.temperature = PromptItem.defaultTemperature
+        case .imageGeneration:
+            configuration.mediaSize = ImageProvider.defaultSize
+        case .videoGeneration:
+            configuration.mediaSize = "720x1280"
+            configuration.durationSeconds = 4
+        case .loop:
+            configuration.comparison = .contains
+            configuration.comparisonValue = "完成"
+            configuration.maxIterations = 3
+        default:
+            break
+        }
+        let node = WorkflowNode(kind: kind, position: position, configuration: configuration)
+        workflows[index].nodes.append(node)
+        workflows[index].updatedAt = Date()
+        scheduleSave()
+        return node.id
+    }
+
+    /// 更新节点配置或位置。
+    func updateNode(_ node: WorkflowNode, in workflowID: UUID) {
+        mutateWorkflow(id: workflowID) { workflow in
+            guard let index = workflow.nodes.firstIndex(where: { $0.id == node.id }) else { return }
+            let oldInputPortIDs = Set(workflow.nodes[index].descriptor.ports(for: workflow.nodes[index]).filter { $0.direction == .input }.map(\.id))
+            workflow.nodes[index] = node
+            let newInputPortIDs = Set(node.descriptor.ports(for: node).filter { $0.direction == .input }.map(\.id))
+            if oldInputPortIDs != newInputPortIDs {
+                workflow.connections.removeAll {
+                    $0.targetNodeID == node.id && !newInputPortIDs.contains($0.targetPortID)
+                }
+            }
+        }
+    }
+
+    /// 删除节点和所有相关连线。
+    func deleteNode(id nodeID: UUID, in workflowID: UUID) {
+        mutateWorkflow(id: workflowID) { workflow in
+            workflow.nodes.removeAll { $0.id == nodeID }
+            workflow.connections.removeAll { $0.sourceNodeID == nodeID || $0.targetNodeID == nodeID }
+        }
+    }
+
+    /// 添加经过端口类型检查的连线。
+    @discardableResult
+    func addConnection(
+        sourceNodeID: UUID,
+        sourcePortID: String,
+        targetNodeID: UUID,
+        targetPortID: String,
+        in workflowID: UUID
+    ) -> Result<UUID, WorkflowStoreError> {
+        guard let workflowIndex = workflows.firstIndex(where: { $0.id == workflowID }) else {
+            return .failure(.missingWorkflow)
+        }
+        var workflow = workflows[workflowIndex]
+        guard sourceNodeID != targetNodeID,
+              let source = workflow.nodes.first(where: { $0.id == sourceNodeID }),
+              let target = workflow.nodes.first(where: { $0.id == targetNodeID })
+        else { return .failure(.invalidConnection("不能把节点连接到自身")) }
+        guard let sourcePort = source.descriptor.ports(for: source).first(where: { $0.id == sourcePortID && $0.direction == .output }),
+              let targetPort = target.descriptor.ports(for: target).first(where: { $0.id == targetPortID && $0.direction == .input })
+        else { return .failure(.invalidConnection("端口不存在或方向错误")) }
+        guard sourcePort.valueType.canConnect(to: targetPort.valueType) else {
+            return .failure(.invalidConnection("\(sourcePort.valueType.title)不能连接到\(targetPort.valueType.title)"))
+        }
+        guard !workflow.connections.contains(where: {
+            $0.targetNodeID == targetNodeID && $0.targetPortID == targetPortID
+        }) else { return .failure(.invalidConnection("每个输入端口只能连接一条线")) }
+        guard !workflow.connections.contains(where: {
+            $0.sourceNodeID == sourceNodeID && $0.sourcePortID == sourcePortID &&
+            $0.targetNodeID == targetNodeID && $0.targetPortID == targetPortID
+        }) else { return .failure(.invalidConnection("这条连线已经存在")) }
+
+        let connection = WorkflowConnection(
+            sourceNodeID: sourceNodeID,
+            sourcePortID: sourcePortID,
+            targetNodeID: targetNodeID,
+            targetPortID: targetPortID
+        )
+        workflow.connections.append(connection)
+        workflow.updatedAt = Date()
+        workflows[workflowIndex] = workflow
+        scheduleSave()
+        return .success(connection.id)
+    }
+
+    /// 删除一条连线。
+    func deleteConnection(id: UUID, in workflowID: UUID) {
+        mutateWorkflow(id: workflowID) { workflow in
+            workflow.connections.removeAll { $0.id == id }
+        }
+    }
+
+    // MARK: - Run history
+
+    /// 从磁盘加载某工作流的完整运行历史。
+    func loadRuns(workflowID: UUID) {
+        let root = runsRootURL.appendingPathComponent(workflowID.uuidString, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: root.path) else {
+            runsByWorkflowID[workflowID] = []
+            return
+        }
+        do {
+            let directories = try FileManager.default.contentsOfDirectory(
+                at: root,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+            let runs = directories.compactMap { directory -> WorkflowRun? in
+                let url = directory.appendingPathComponent("run.json")
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                return try? decoder.decode(WorkflowRun.self, from: data)
+            }
+            runsByWorkflowID[workflowID] = runs.sorted { $0.startedAt > $1.startedAt }
+        } catch {
+            lastError = error.localizedDescription
+            runsByWorkflowID[workflowID] = []
+        }
+    }
+
+    /// 保存当前运行快照并刷新历史列表。
+    func saveRun(_ run: WorkflowRun) {
+        activeRun = run
+        let root = runRoot(workflowID: run.workflowID, runID: run.id)
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: assetsDirectory(workflowID: run.workflowID, runID: run.id),
+                withIntermediateDirectories: true
+            )
+            let data = try encoder.encode(run)
+            try data.write(to: root.appendingPathComponent("run.json"), options: .atomic)
+            var runs = runsByWorkflowID[run.workflowID] ?? []
+            if let index = runs.firstIndex(where: { $0.id == run.id }) {
+                runs[index] = run
+            } else {
+                runs.insert(run, at: 0)
+            }
+            runsByWorkflowID[run.workflowID] = runs.sorted { $0.startedAt > $1.startedAt }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// 删除一次运行及其媒体。
+    func deleteRun(workflowID: UUID, runID: UUID) {
+        let root = runRoot(workflowID: workflowID, runID: runID)
+        do {
+            if FileManager.default.fileExists(atPath: root.path) {
+                try FileManager.default.removeItem(at: root)
+            }
+            runsByWorkflowID[workflowID]?.removeAll { $0.id == runID }
+            if activeRun?.id == runID { activeRun = nil }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// 删除一个工作流的全部运行历史。
+    func deleteAllRuns(workflowID: UUID) {
+        let root = runsRootURL.appendingPathComponent(workflowID.uuidString, isDirectory: true)
+        do {
+            if FileManager.default.fileExists(atPath: root.path) {
+                try FileManager.default.removeItem(at: root)
+            }
+            runsByWorkflowID[workflowID] = []
+            if activeRun?.workflowID == workflowID { activeRun = nil }
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    /// 把相对媒体路径解析为本地文件 URL。
+    func artifactURL(for value: WorkflowValue, run: WorkflowRun) -> URL? {
+        switch value {
+        case .text:
+            return nil
+        case .image(let relative), .video(let relative):
+            let url = runRoot(workflowID: run.workflowID, runID: run.id)
+                .appendingPathComponent(relative)
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
+    }
+
+    // MARK: - Persistence
+
+    /// 立即保存工作流定义。
+    func saveNow() {
+        debouncer.cancel()
+        do {
+            let file = WorkflowDefinitionsFile(workflows: workflows)
+            let data = try encoder.encode(file)
+            try data.write(to: definitionsURL, options: .atomic)
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func scheduleSave() {
+        debouncer.schedule { [weak self] in self?.saveNow() }
+    }
+
+    private func loadDefinitions() {
+        let url = definitionsURL
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            workflows = [WorkflowDefinition.starter()]
+            saveNow()
+            return
+        }
+        do {
+            let data = try Data(contentsOf: url)
+            let file = try decoder.decode(WorkflowDefinitionsFile.self, from: data)
+            workflows = file.workflows
+        } catch {
+            lastError = error.localizedDescription
+            workflows = [WorkflowDefinition.starter()]
+        }
+    }
+
+    private func availableName(base: String) -> String {
+        if !workflows.contains(where: { $0.name == base }) { return base }
+        var suffix = 2
+        while workflows.contains(where: { $0.name == "\(base) \(suffix)" }) { suffix += 1 }
+        return "\(base) \(suffix)"
+    }
+
+    /// 指定运行的隔离目录。
+    func runRoot(workflowID: UUID, runID: UUID) -> URL {
+        runsRootURL
+            .appendingPathComponent(workflowID.uuidString, isDirectory: true)
+            .appendingPathComponent(runID.uuidString, isDirectory: true)
+    }
+
+    /// 指定运行的媒体产物目录。
+    func assetsDirectory(workflowID: UUID, runID: UUID) -> URL {
+        runRoot(workflowID: workflowID, runID: runID)
+            .appendingPathComponent("Assets", isDirectory: true)
+    }
+}
+
+private struct WorkflowDefinitionsFile: Codable {
+    var formatVersion: Int
+    var workflows: [WorkflowDefinition]
+
+    init(workflows: [WorkflowDefinition]) {
+        formatVersion = 1
+        self.workflows = workflows
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        formatVersion = try container.decodeIfPresent(Int.self, forKey: .formatVersion) ?? 1
+        workflows = try container.decodeIfPresent([WorkflowDefinition].self, forKey: .workflows) ?? []
+    }
+}

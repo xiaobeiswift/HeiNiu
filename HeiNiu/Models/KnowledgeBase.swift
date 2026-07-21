@@ -124,6 +124,24 @@ nonisolated struct KnowledgeChunk: Identifiable, Hashable, Sendable {
     var embeddingFingerprint: String
 }
 
+/// 工作流知识检索返回的一条相似片段。
+nonisolated struct KnowledgeSearchResult: Identifiable, Hashable, Sendable {
+    /// 使用知识分块 ID 作为稳定标识符。
+    var id: UUID { chunkID }
+    /// 分块 ID。
+    var chunkID: UUID
+    /// 所属资料 ID。
+    var documentID: UUID
+    /// 资料标题。
+    var documentTitle: String
+    /// 分块序号。
+    var ordinal: Int
+    /// 分块正文。
+    var text: String
+    /// 余弦相似度。
+    var score: Double
+}
+
 /// 知识库导入汇总。
 nonisolated struct KnowledgeImportSummary: Sendable {
     var createdIDs: [UUID] = []

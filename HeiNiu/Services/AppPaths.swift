@@ -39,10 +39,44 @@ enum AppPaths {
         knowledgeBaseRoot.appendingPathComponent("Files", isDirectory: true)
     }
 
+    /// 节点工作流根目录。
+    static var workflowsRoot: URL {
+        applicationSupportRoot.appendingPathComponent("Workflows", isDirectory: true)
+    }
+
+    /// 全部工作流模板定义文件。
+    static var workflowDefinitionsURL: URL {
+        workflowsRoot.appendingPathComponent("workflows.json", isDirectory: false)
+    }
+
+    /// 工作流运行历史根目录。
+    static var workflowRunsRoot: URL {
+        workflowsRoot.appendingPathComponent("Runs", isDirectory: true)
+    }
+
+    /// 指定工作流的一次运行目录。
+    static func workflowRunRoot(workflowID: UUID, runID: UUID) -> URL {
+        workflowRunsRoot
+            .appendingPathComponent(workflowID.uuidString, isDirectory: true)
+            .appendingPathComponent(runID.uuidString, isDirectory: true)
+    }
+
+    /// 指定运行保存图片和视频的目录。
+    static func workflowRunAssets(workflowID: UUID, runID: UUID) -> URL {
+        workflowRunRoot(workflowID: workflowID, runID: runID)
+            .appendingPathComponent("Assets", isDirectory: true)
+    }
+
     /// 确保 Application Support 根目录与知识库目录存在。
     static func ensureDirectories() {
         let fm = FileManager.default
-        for url in [applicationSupportRoot, knowledgeBaseRoot, knowledgeFilesRoot] {
+        for url in [
+            applicationSupportRoot,
+            knowledgeBaseRoot,
+            knowledgeFilesRoot,
+            workflowsRoot,
+            workflowRunsRoot,
+        ] {
             if !fm.fileExists(atPath: url.path) {
                 try? fm.createDirectory(at: url, withIntermediateDirectories: true)
             }

@@ -158,6 +158,16 @@ private struct VideoProviderCard: View {
         !settings.videoAPIKey(for: provider.id).isEmpty || !apiKey.isEmpty
     }
 
+    /// 当前源码适配器公开的能力说明。
+    private var adapterDescriptor: MediaAdapterDescriptor? {
+        MediaAdapterRegistry.shared.videoAdapter(id: draft.adapterID)?.descriptor
+    }
+
+    /// 未注册适配器仍显示为可诊断的旧配置。
+    private var adapterDisplayName: String {
+        adapterDescriptor?.displayName ?? "未注册适配器"
+    }
+
     /// SwiftUI 视图内容。
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -204,7 +214,7 @@ private struct VideoProviderCard: View {
                 Text(draft.name.isEmpty ? "未命名生视频服务商" : draft.name)
                     .font(.headline)
                 HStack(spacing: 8) {
-                    StatusBadge(text: draft.kind.displayName, style: .accent, systemImage: "video")
+                    StatusBadge(text: adapterDisplayName, style: .accent, systemImage: "video")
                     StatusBadge(text: "\(draft.models.count) 模型", style: .neutral)
                     StatusBadge(text: draft.defaultAspectRatio, style: .neutral)
                     StatusBadge(text: "\(draft.defaultDurationSeconds)s", style: .neutral)
@@ -240,32 +250,34 @@ private struct VideoProviderCard: View {
                 StudioTextField(title: "名称", text: $draft.name, placeholder: "例如：Sora / 可灵 / 自定义网关")
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("协议")
+                    Text("源码适配器")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(AppTheme.textSecondary)
-                    Picker("协议", selection: $draft.kind) {
-                        ForEach(VideoProviderKind.allCases) { kind in
-                            Text(kind.displayName).tag(kind)
+                    Picker("源码适配器", selection: $draft.adapterID) {
+                        ForEach(MediaAdapterRegistry.shared.videoDescriptors) { descriptor in
+                            Text(descriptor.displayName).tag(descriptor.id)
+                        }
+                        if adapterDescriptor == nil {
+                            Text("未注册：\(draft.adapterID)").tag(draft.adapterID)
                         }
                     }
-                    .pickerStyle(.segmented)
                     .labelsHidden()
-                    .onChange(of: draft.kind) { _, newValue in
-                        let defaults = [
-                            VideoProviderKind.openAICompatible.defaultBaseURL,
-                            VideoProviderKind.generic.defaultBaseURL,
-                        ]
-                        if draft.baseURL.isEmpty || defaults.contains(draft.baseURL) {
-                            draft.baseURL = newValue.defaultBaseURL
+                    .onChange(of: draft.adapterID) { _, newValue in
+                        guard let descriptor = MediaAdapterRegistry.shared.videoAdapter(id: newValue)?.descriptor else { return }
+                        if newValue == VideoProvider.openAIAdapterID {
+                            draft.kind = .openAICompatible
+                            if draft.baseURL.isEmpty { draft.baseURL = draft.kind.defaultBaseURL }
+                            if draft.models.isEmpty { draft.models = draft.kind.defaultModels }
                         }
-                        if draft.models.isEmpty {
-                            draft.models = newValue.defaultModels
+                        if !descriptor.supportedDurations.contains(draft.defaultDurationSeconds),
+                           let first = descriptor.supportedDurations.first {
+                            draft.defaultDurationSeconds = first
                         }
                     }
 
-                    Text(draft.kind.endpointHint)
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.textTertiary)
+                    Text(adapterDescriptor?.endpointHint ?? "适配器 \(draft.adapterID) 未在当前版本注册，因此不能执行。")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(adapterDescriptor == nil ? AppTheme.danger : AppTheme.textTertiary)
                 }
             }
 
@@ -298,8 +310,10 @@ private struct VideoProviderCard: View {
                     Text("时长（秒）")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(AppTheme.textSecondary)
-                    // 用字符串 chip 再映射
-                    DurationChipSelector(selection: $draft.defaultDurationSeconds)
+                    DurationChipSelector(
+                        items: adapterDescriptor?.supportedDurations ?? VideoProvider.availableDurations,
+                        selection: $draft.defaultDurationSeconds
+                    )
                 }
             }
 
@@ -322,7 +336,8 @@ private struct VideoProviderCard: View {
                     .overlay(Capsule().stroke(AppTheme.strokeStrong, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
-                .disabled(isTesting)
+                .disabled(isTesting || adapterDescriptor == nil)
+                .help(adapterDescriptor == nil ? "当前源码适配器未注册，不能测试连接" : "使用当前配置测试媒体接口")
 
                 if let testMessage {
                     Label(testMessage, systemImage: testOK == true ? "checkmark.circle.fill" : "xmark.circle.fill")
@@ -382,12 +397,14 @@ private struct VideoProviderCard: View {
 ///
 /// `DurationChipSelector` 类型定义。
 private struct DurationChipSelector: View {
+    /// 当前适配器允许的时长。
+    let items: [Int]
     @Binding var selection: Int
 
     /// SwiftUI 视图内容。
     var body: some View {
         FlowLayout(spacing: 8) {
-            ForEach(VideoProvider.availableDurations, id: \.self) { seconds in
+            ForEach(items, id: \.self) { seconds in
                 let selected = selection == seconds
                 Button {
                     selection = seconds

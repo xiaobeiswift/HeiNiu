@@ -10,8 +10,9 @@ import SwiftUI
 /// 创建并注入全局状态：
 /// - ``SettingsStore``：服务商、提示词与备份等配置
 /// - ``KnowledgeStore``：全局知识库、向量索引与检索
+/// - ``WorkflowStore``：全局节点工作流与运行历史
 ///
-/// 主界面为 ``MainView``，默认窗口约 1280×820。
+/// 主界面为 ``MainView``，默认窗口约 1440×860。
 /// HeiNiuApp
 ///
 /// `HeiNiuApp` 类型定义。
@@ -21,6 +22,8 @@ struct HeiNiuApp: App {
     @State private var settings = SettingsStore()
     /// 全局知识库。
     @State private var knowledgeStore = KnowledgeStore()
+    /// 全局节点工作流与运行历史。
+    @State private var workflowStore = WorkflowStore()
 
     /// 场景：主窗口。
     var body: some Scene {
@@ -28,9 +31,10 @@ struct HeiNiuApp: App {
             MainView()
                 .environment(settings)
                 .environment(knowledgeStore)
-                .frame(minWidth: 1040, minHeight: 680)
+                .environment(workflowStore)
+                .frame(minWidth: 1200, minHeight: 720)
                 .background(AppTheme.bgBase)
         }
-        .defaultSize(width: 1280, height: 820)
+        .defaultSize(width: 1440, height: 860)
     }
 }
