@@ -11,8 +11,6 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     case scripts
     /// 分镜。
     case storyboards
-    /// 资产库。
-    case assets
     /// 知识库。
     case knowledge
     /// 设置。
@@ -26,7 +24,6 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .scripts: "剧本"
         case .storyboards: "分镜"
-        case .assets: "资产库"
         case .knowledge: "知识库"
         case .settings: "设置"
         }
@@ -37,14 +34,13 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .scripts: "doc.text"
         case .storyboards: "rectangle.split.3x1"
-        case .assets: "square.grid.2x2"
         case .knowledge: "books.vertical"
         case .settings: "gearshape"
         }
     }
 
     /// 工作台模块。
-    static let workspaceItems: [SidebarItem] = [.knowledge, .scripts, .storyboards, .assets]
+    static let workspaceItems: [SidebarItem] = [.knowledge, .scripts, .storyboards]
 }
 
 /// 主窗口：工作台导航与详情。
@@ -148,13 +144,6 @@ struct MainView: View {
                 title: "分镜",
                 systemImage: "rectangle.split.3x1",
                 message: "将剧本拆成镜头，并生成视频提示词。",
-                badge: "即将推出"
-            )
-        case .assets:
-            PlaceholderView(
-                title: "资产库",
-                systemImage: "square.grid.2x2",
-                message: "管理角色、场景与道具等可复用资产。",
                 badge: "即将推出"
             )
         case .knowledge:
