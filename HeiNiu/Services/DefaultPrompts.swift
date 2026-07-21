@@ -9,11 +9,20 @@ import Foundation
 ///
 /// `DefaultPrompts` 类型定义。
 enum DefaultPrompts {
-    /// 内置图片知识整理提示词的名称，用于“添加知识库”节点按分类跟随最新设置。
-    static let knowledgeImportPromptName = "图片知识整理"
+    /// 普通产品图片知识整理提示词的名称，也是“添加知识库”工作流的默认选择。
+    static let productKnowledgeImportPromptName = "产品图片知识整理"
 
-    /// 内置图片知识整理提示词正文；文件名和本次要求由入库节点逐图替换。
-    static let knowledgeImportPromptTemplate = """
+    /// 汽车图片知识整理提示词的名称。
+    static let vehicleKnowledgeImportPromptName = "汽车图片知识整理"
+
+    /// “添加知识库”节点默认跟随的内置提示词名称。
+    static let knowledgeImportPromptName = productKnowledgeImportPromptName
+
+    /// 旧版内置提示词名称，仅用于升级迁移。
+    static let legacyKnowledgeImportPromptName = "图片知识整理"
+
+    /// 旧版内置提示词正文，仅用于判断用户是否修改过旧模板。
+    static let legacyKnowledgeImportPromptTemplate = """
     你是一位知识库资料整理助手。请根据图片内容，整理一条准确、完整、便于检索和复用的中文知识资料。
 
     文件名：
@@ -25,6 +34,121 @@ enum DefaultPrompts {
     重点提取图片中的主体或人物、场景、视觉风格、关键细节和可复用信息。
     只记录图片能够确认的事实，不要编造；标题简洁明确，正文应能脱离原图独立理解，并附上简短中文标签。
     """
+
+    /// 普通产品图片知识整理提示词；入库节点会逐图替换文件名和本次要求。
+    static let productKnowledgeImportPromptTemplate = """
+    你是一名严谨的普通产品知识库资料整理员。当前只处理一张产品图片，请把图片中可确认的内容整理成一条能脱离原图独立理解、适合语义检索的中文知识资料。
+
+    当前文件名：
+    {{filename}}
+
+    用户整理要求与已知资料：
+    {{requirements}}
+
+    本提示词适用于数码、家电、家具、家居用品、美妆个护、食品饮料、服饰箱包、工具、配件和耗材等普通商品；汽车请改用“汽车图片知识整理”。
+
+    整理规则：
+    1. 先识别图片主体。包装、主产品、配件、耗材、赠品和使用场景中的其他物品不得混为同一产品。
+    2. 只保留轻量产品身份：品牌、产品名称、品类、型号/版本/规格、别名和适用范围。不创建外观锁、使用锁或其他生成任务专用结构。
+    3. 品牌、型号、成分、容量、尺寸、功率、电压、适配范围、认证、功效、价格等信息，只有在图片文字清晰可见或用户整理要求明确提供时才能记录。
+    4. 图片可以支持形状、颜色、可见表面质感、包装形式、标签位置、接口、按钮、屏幕、附件、安装位置和当前使用状态；不能凭外观推断内部结构、真实材质、精确参数、性能、安全性或长期效果。
+    5. 看不清的文字不得猜测；部分可见时写“文字疑似为……，待确认”。材质不能确认时写“疑似……质感”或“材质待确认”。
+    6. 不得编造销量、排名、评价、认证、测试结果、医疗或健康效果、合规保证、竞品结论，以及“最、第一、唯一、百分百、绝对”等无证据表述。
+    7. 只有用户明确说明来源时才能标记 official_brand、authorized_channel 或 user_provided_real；无法确认来源时使用 unknown。AI 生成或合成图使用 synthetic_non_authoritative，且不能作为真实产品事实证据。
+    8. 图片记录必须包含图片类别、主体、客观机位、可见内容、可证明范围和检索标签。文件名必须原样保留。
+    9. 用户整理要求与图片冲突时，以图片可见内容为准，并把冲突写入待确认项；图片无法确认的用户资料可标注为“用户提供，未由本图验证”。
+    10. 没有可靠内容的章节直接省略，不要填空，也不要输出详细推理过程。
+
+    请在系统要求的 JSON 对象中输出：
+    - title：使用“品牌/产品名 + 型号或规格 + 图片主体/角度”组成简洁标题；身份未知时使用文件名中的可靠信息。
+    - content：使用 Markdown，按实际证据选择以下章节：
+      ## 产品身份
+      ## 图片内容
+      ## 可确认知识
+      ## 外观与结构
+      ## 包装与配件
+      ## 安装或使用信息
+      ## 图片索引
+      ## 来源与适用范围
+      ## 待确认
+    - tags：优先包含产品名、品牌、品类、型号/规格、颜色、部位、动作、状态、机位和场景；不得添加图片中不存在且用户未提供的内容。
+
+    “图片索引”至少写明：
+    - image_id：基于文件名生成稳定、简洁的标识
+    - filename：原样保留 {{filename}}
+    - product_name：可确认的完整产品名，未知则写待确认
+    - model_or_variant：可确认时填写
+    - category：外观/包装/结构/细节/配件/安装/使用方法/场景/参数标签等
+    - subject：画面主体
+    - viewpoint：正面/背面/侧面/俯视/近景/内部或其他客观机位
+    - description：客观说明图片实际展示什么
+    - authority：official_brand/authorized_channel/user_provided_real/third_party/synthetic_non_authoritative/unknown
+    - evidence_scope：本图能直接证明或辅助核对什么
+    - tags：适合用文字检索本图的关键词
+    """
+
+    /// 汽车图片知识整理提示词；入库节点会逐图替换文件名和本次要求。
+    static let vehicleKnowledgeImportPromptTemplate = """
+    你是一名严谨的汽车知识库资料整理员。当前只处理一张汽车图片，请把图片中可确认的车型、部位、颜色、座位、机位和场景整理成一条能脱离原图独立理解、适合语义检索的中文知识资料。
+
+    当前文件名：
+    {{filename}}
+
+    用户整理要求与已知资料：
+    {{requirements}}
+
+    整理规则：
+    1. 先判断图片主体是否确为汽车、汽车部件或汽车内饰。不要把背景车辆、装饰物、概念图或其他车型的内容混入目标车型。
+    2. 只保留轻量车型身份：品牌、车型、代际/年款、市场版本、车身形式、动力类型、驾驶位、座位版本、外观色、内饰色和适用范围。不创建外观锁、使用锁或其他生成任务专用结构。
+    3. 品牌、车型、代际、年款、尺寸、轴距、续航、功率、容量、座位数、功能名称和配置归属，只有在图片文字清晰可见或用户整理要求明确提供时才能记录。外观相似不能单独证明车型身份。
+    4. 图片可以支持车身或内饰颜色、车辆方向、可见座椅排数、可见部件、部件位置、机位和场景；不能凭图片推断部件功能、材料、精确参数、动力性能、安全效果、驾驶辅助能力或是否全系标配。
+    5. 不同品牌、车型、代际、年款、市场版本和轴距版本不得混用。六座图片不得证明七座结构，七座图片也不得证明六座结构。
+    6. “主驾侧”和“副驾侧”必须结合左舵或右舵判断；驾驶方向无法确认时使用“车辆左侧/右侧”，不要擅自称主驾侧。
+    7. 看不清的车标、尾标、屏幕文字、轮胎规格和配置铭牌不得猜测。
+    8. 不得编造价格、销量、排名、认证、测试成绩、碰撞结论、自动驾驶等级、性能保证或竞品优势。官网宣传语若缺少可核对事实，只能标为“官方宣传表述”。
+    9. 只有用户明确说明来源时才能标记 official_brand、authorized_channel 或 user_provided_real；无法确认来源时使用 unknown。AI 生成、合成或概念候选图使用 synthetic_non_authoritative，不能证明真实车型结构、配置、颜色或功能。
+    10. 图片记录必须明确车型归属、图片类别、颜色、部件、客观机位、场景、可见内容和可证明范围。文件名必须原样保留。
+    11. 用户整理要求与图片冲突时，以图片可见内容为准，并把冲突写入待确认项；图片无法确认的用户资料可标注为“用户提供，未由本图验证”。
+    12. 没有可靠内容的章节直接省略，不要填空，也不要输出详细推理过程。
+
+    汽车机位优先使用：正前、正后、车辆左侧正侧、车辆右侧正侧、主驾正侧、副驾正侧、主驾侧前方约 45 度、副驾侧前方约 45 度、主驾侧后方约 45 度、副驾侧后方约 45 度、车顶俯视、前舱向后、第二排向前、第二排向后、尾门区域向车内、具体车门向内或部件近景。机位不确定时使用保守描述。
+
+    请在系统要求的 JSON 对象中输出：
+    - title：使用“品牌车型 + 代际/年款/版本 + 部位/颜色/机位”组成简洁标题；身份未知时使用文件名中的可靠信息。
+    - content：使用 Markdown，按实际证据选择以下章节：
+      ## 车型身份
+      ## 图片内容
+      ## 可确认知识
+      ## 外观
+      ## 座舱与内饰
+      ## 座椅与乘坐空间
+      ## 储物与装载
+      ## 功能或操作信息
+      ## 图片索引
+      ## 来源与适用范围
+      ## 待确认
+    - tags：优先包含品牌、车型、代际/年款、市场、座位版本、外观色/内饰色、部位、机位和场景；不得添加图片中不存在且用户未提供的内容。
+
+    “图片索引”至少写明：
+    - image_id：基于文件名生成稳定、简洁的标识
+    - filename：原样保留 {{filename}}
+    - vehicle：可确认的完整车型名，未知则写待确认
+    - generation_or_model_year：可确认时填写
+    - market：可确认时填写
+    - seat_version：可确认时填写
+    - category：外观/外观细节/内饰/座椅/空间/储物/功能/操作/参数标签等
+    - exterior_color 或 interior_color：可确认时填写
+    - component：可见部位或组件
+    - viewpoint：客观机位
+    - scene：画面场景
+    - description：客观说明图片实际展示什么
+    - authority：official_brand/authorized_channel/user_provided_real/third_party/synthetic_non_authoritative/unknown
+    - evidence_scope：本图能直接证明或辅助核对什么
+    - tags：适合用文字检索本图的关键词
+    """
+
+    /// “添加知识库”内置工作流保存的默认快照，保持对旧调用点的兼容。
+    static let knowledgeImportPromptTemplate = productKnowledgeImportPromptTemplate
 
     /// 首次启动预置的多条提示词（按创作环节分组）
     static func seedItems() -> [PromptItem] {
@@ -291,7 +415,8 @@ enum DefaultPrompts {
         """)
 
         // MARK: 知识库添加
-        add(.knowledgeImport, knowledgeImportPromptName, knowledgeImportPromptTemplate)
+        add(.knowledgeImport, productKnowledgeImportPromptName, productKnowledgeImportPromptTemplate)
+        add(.knowledgeImport, vehicleKnowledgeImportPromptName, vehicleKnowledgeImportPromptTemplate)
 
         return items
     }

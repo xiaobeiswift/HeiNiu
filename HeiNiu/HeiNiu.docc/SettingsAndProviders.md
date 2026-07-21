@@ -26,7 +26,7 @@
 - 分类：``PromptCategory``  
 - 条目：``PromptItem``（每类多条）  
 - 默认模板：``DefaultPrompts``  
-- “知识库添加”分类预置图片知识整理模板，可使用 `{{filename}}` 与 `{{requirements}}` 变量
+- “知识库添加”分类预置“产品图片知识整理”和“汽车图片知识整理”两套模板，前者是内置“添加知识库”工作流的默认选择；两者均可使用 `{{filename}}` 与 `{{requirements}}` 变量
 
 ## 生图 / 生视频
 

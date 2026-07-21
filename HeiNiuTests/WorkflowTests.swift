@@ -110,14 +110,28 @@ final class WorkflowModelTests: XCTestCase {
         XCTAssertEqual(PromptCategory.knowledgeImport.displayName, "知识库添加")
         XCTAssertEqual(PromptCategory.knowledgeImport.suggestedVariables, ["filename", "requirements"])
 
-        let prompt = try XCTUnwrap(
+        let productPrompt = try XCTUnwrap(
             DefaultPrompts.seedItems().first {
-                $0.category == .knowledgeImport && $0.name == "图片知识整理"
+                $0.category == .knowledgeImport && $0.name == DefaultPrompts.productKnowledgeImportPromptName
             }
         )
-        XCTAssertTrue(prompt.isBuiltIn)
-        XCTAssertTrue(prompt.template.contains("{{filename}}"))
-        XCTAssertTrue(prompt.template.contains("{{requirements}}"))
+        let vehiclePrompt = try XCTUnwrap(
+            DefaultPrompts.seedItems().first {
+                $0.category == .knowledgeImport && $0.name == DefaultPrompts.vehicleKnowledgeImportPromptName
+            }
+        )
+        XCTAssertEqual(
+            DefaultPrompts.seedItems().filter { $0.category == .knowledgeImport }.count,
+            2
+        )
+        XCTAssertTrue(productPrompt.isBuiltIn)
+        XCTAssertTrue(productPrompt.template.contains("{{filename}}"))
+        XCTAssertTrue(productPrompt.template.contains("{{requirements}}"))
+        XCTAssertTrue(productPrompt.template.contains("普通产品知识库资料整理员"))
+        XCTAssertTrue(vehiclePrompt.isBuiltIn)
+        XCTAssertTrue(vehiclePrompt.template.contains("{{filename}}"))
+        XCTAssertTrue(vehiclePrompt.template.contains("{{requirements}}"))
+        XCTAssertTrue(vehiclePrompt.template.contains("汽车知识库资料整理员"))
         XCTAssertTrue(DefaultPrompts.blankTemplate(for: .knowledgeImport).contains("{{filename}}"))
 
         let settings = SettingsStore()

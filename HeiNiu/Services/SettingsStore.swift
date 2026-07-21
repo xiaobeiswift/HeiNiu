@@ -673,7 +673,32 @@ final class SettingsStore {
     ///
     /// 执行 `seedMissingBuiltInPrompts` 相关逻辑。
     private func seedMissingBuiltInPrompts() -> Bool {
-        var added = false
+        var changed = false
+
+        if let legacyIndex = promptItems.firstIndex(where: {
+            $0.category == .knowledgeImport &&
+            $0.name == DefaultPrompts.legacyKnowledgeImportPromptName &&
+            $0.isBuiltIn
+        }) {
+            let legacyWasUnmodified = promptItems[legacyIndex].template == DefaultPrompts.legacyKnowledgeImportPromptTemplate
+            if legacyWasUnmodified {
+                let alreadyHasProductPrompt = promptItems.contains {
+                    $0.category == .knowledgeImport && $0.name == DefaultPrompts.productKnowledgeImportPromptName
+                }
+                if alreadyHasProductPrompt {
+                    promptItems.remove(at: legacyIndex)
+                } else {
+                    promptItems[legacyIndex].name = DefaultPrompts.productKnowledgeImportPromptName
+                    promptItems[legacyIndex].template = DefaultPrompts.productKnowledgeImportPromptTemplate
+                    promptItems[legacyIndex].updatedAt = Date()
+                }
+            } else {
+                // 用户修改过的旧模板保留为自定义项，新内置模板在下方补齐。
+                promptItems[legacyIndex].isBuiltIn = false
+            }
+            changed = true
+        }
+
         let existing = Set(promptItems.map { "\($0.category.rawValue)|\($0.name)" })
         var nextOrder = (promptItems.map(\.sortOrder).max() ?? -1) + 1
         for seed in DefaultPrompts.seedItems() {
@@ -683,9 +708,9 @@ final class SettingsStore {
             item.sortOrder = nextOrder
             nextOrder += 1
             promptItems.append(item)
-            added = true
+            changed = true
         }
-        return added
+        return changed
     }
 
     /// setKey
