@@ -16,6 +16,7 @@ import UniformTypeIdentifiers
 struct ProjectPipelineView: View {
     @Environment(ProjectStore.self) private var projects
     @Environment(SettingsStore.self) private var settings
+    @Environment(KnowledgeStore.self) private var knowledge
 
     let project: ProjectItem
 
@@ -603,6 +604,40 @@ struct ProjectPipelineView: View {
                         .stroke(AppTheme.stroke, lineWidth: 1)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            if let warning = selectedStep.knowledgeWarning {
+                Text(warning)
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+
+            if !selectedStep.knowledgeCitations.isEmpty {
+                DisclosureGroup("知识引用（\(selectedStep.knowledgeCitations.count)）") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(selectedStep.knowledgeCitations) { citation in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text(citation.documentTitle)
+                                        .font(.caption.weight(.semibold))
+                                    Spacer()
+                                    Text(String(format: "%.1f%%", citation.similarity * 100))
+                                        .font(.caption2.monospacedDigit())
+                                        .foregroundStyle(AppTheme.textTertiary)
+                                }
+                                Text(citation.chunkText)
+                                    .font(.caption)
+                                    .foregroundStyle(AppTheme.textSecondary)
+                                    .lineLimit(5)
+                                    .textSelection(.enabled)
+                            }
+                            .padding(10)
+                            .background(AppTheme.bgCard, in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.caption.weight(.medium))
+            }
         }
     }
 
@@ -732,6 +767,8 @@ struct ProjectPipelineView: View {
             $0.status = .idle
             $0.outputText = ""
             $0.errorMessage = nil
+            $0.knowledgeCitations = []
+            $0.knowledgeWarning = nil
         }
         pipeline = pipe
         projects.savePipeline(pipe)
@@ -765,6 +802,7 @@ struct ProjectPipelineView: View {
                 kind,
                 projectID: project.id,
                 settings: settings,
+                knowledge: knowledge,
                 options: options
             )
             // 结果可能很长：先结束 running 态再挂正文，减少同一帧双重重绘

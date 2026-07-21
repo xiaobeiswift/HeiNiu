@@ -111,6 +111,10 @@ nonisolated struct PipelineStep: Identifiable, Codable, Hashable, Sendable {
     var outputText: String
     /// 失败信息。
     var errorMessage: String?
+    /// 本次生成命中的知识来源。
+    var knowledgeCitations: [KnowledgeCitation]
+    /// 部分资料未就绪等非致命提醒。
+    var knowledgeWarning: String?
     /// 最近更新。
     var updatedAt: Date
 
@@ -119,12 +123,16 @@ nonisolated struct PipelineStep: Identifiable, Codable, Hashable, Sendable {
         status: PipelineStepStatus = .idle,
         outputText: String = "",
         errorMessage: String? = nil,
+        knowledgeCitations: [KnowledgeCitation] = [],
+        knowledgeWarning: String? = nil,
         updatedAt: Date = Date()
     ) {
         self.kind = kind
         self.status = status
         self.outputText = outputText
         self.errorMessage = errorMessage
+        self.knowledgeCitations = knowledgeCitations
+        self.knowledgeWarning = knowledgeWarning
         self.updatedAt = updatedAt
     }
 
@@ -134,11 +142,13 @@ nonisolated struct PipelineStep: Identifiable, Codable, Hashable, Sendable {
         status = try c.decodeIfPresent(PipelineStepStatus.self, forKey: .status) ?? .idle
         outputText = try c.decodeIfPresent(String.self, forKey: .outputText) ?? ""
         errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        knowledgeCitations = try c.decodeIfPresent([KnowledgeCitation].self, forKey: .knowledgeCitations) ?? []
+        knowledgeWarning = try c.decodeIfPresent(String.self, forKey: .knowledgeWarning)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, status, outputText, errorMessage, updatedAt
+        case kind, status, outputText, errorMessage, knowledgeCitations, knowledgeWarning, updatedAt
     }
 
     var hasOutput: Bool {
@@ -152,7 +162,7 @@ nonisolated struct PipelineStep: Identifiable, Codable, Hashable, Sendable {
 nonisolated struct ProjectPipeline: Codable, Hashable, Sendable {
     /// 所属项目。
     var projectID: UUID
-    /// 有序步骤（与 ``PipelineStepKind/allCases`` 对齐）。
+    /// 有序步骤（与 `PipelineStepKind.allCases` 对齐）。
     var steps: [PipelineStep]
     /// 当前聚焦步骤。
     var currentKind: PipelineStepKind
@@ -180,7 +190,7 @@ nonisolated struct ProjectPipeline: Codable, Hashable, Sendable {
         projectID = try c.decodeIfPresent(UUID.self, forKey: .projectID) ?? UUID()
         let decoded = try c.decodeIfPresent([PipelineStep].self, forKey: .steps) ?? []
         // 合并缺省步骤，兼容后续新增 kind
-        var map = Dictionary(uniqueKeysWithValues: decoded.map { ($0.kind, $0) })
+        let map = Dictionary(uniqueKeysWithValues: decoded.map { ($0.kind, $0) })
         steps = PipelineStepKind.allCases.map { map[$0] ?? PipelineStep(kind: $0) }
         currentKind = try c.decodeIfPresent(PipelineStepKind.self, forKey: .currentKind) ?? .script
         scriptInput = try c.decodeIfPresent(String.self, forKey: .scriptInput) ?? ""

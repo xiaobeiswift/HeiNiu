@@ -80,6 +80,10 @@ nonisolated struct ProjectItem: Identifiable, Codable, Hashable, Sendable {
     var notes: String
     /// 外部素材文件夹路径（可选；有值视为「外部文件夹」项目）。
     var folderPath: String?
+    /// 项目引用的全局知识集合。
+    var knowledgeCollectionIDs: [UUID]
+    /// 项目单独引用的全局知识资料。
+    var knowledgeDocumentIDs: [UUID]
     /// 列表排序，越小越靠前；同权按 `updatedAt`。
     var sortOrder: Int
     /// 创建时间。
@@ -102,6 +106,8 @@ nonisolated struct ProjectItem: Identifiable, Codable, Hashable, Sendable {
         episodeDurationSeconds: Int? = nil,
         notes: String = "",
         folderPath: String? = nil,
+        knowledgeCollectionIDs: [UUID] = [],
+        knowledgeDocumentIDs: [UUID] = [],
         sortOrder: Int = 0,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
@@ -117,6 +123,8 @@ nonisolated struct ProjectItem: Identifiable, Codable, Hashable, Sendable {
         self.episodeDurationSeconds = episodeDurationSeconds
         self.notes = notes
         self.folderPath = folderPath
+        self.knowledgeCollectionIDs = knowledgeCollectionIDs
+        self.knowledgeDocumentIDs = knowledgeDocumentIDs
         self.sortOrder = sortOrder
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -136,6 +144,8 @@ nonisolated struct ProjectItem: Identifiable, Codable, Hashable, Sendable {
         episodeDurationSeconds = try container.decodeIfPresent(Int.self, forKey: .episodeDurationSeconds)
         notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
         folderPath = try container.decodeIfPresent(String.self, forKey: .folderPath)
+        knowledgeCollectionIDs = try container.decodeIfPresent([UUID].self, forKey: .knowledgeCollectionIDs) ?? []
+        knowledgeDocumentIDs = try container.decodeIfPresent([UUID].self, forKey: .knowledgeDocumentIDs) ?? []
         sortOrder = try container.decodeIfPresent(Int.self, forKey: .sortOrder) ?? 0
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
@@ -144,6 +154,7 @@ nonisolated struct ProjectItem: Identifiable, Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, name, logline, synopsis, genre, audience, status
         case targetEpisodeCount, episodeDurationSeconds, notes, folderPath
+        case knowledgeCollectionIDs, knowledgeDocumentIDs
         case sortOrder, createdAt, updatedAt
     }
 
@@ -180,7 +191,7 @@ nonisolated struct ProjectItem: Identifiable, Codable, Hashable, Sendable {
         return f
     }()
 
-    nonisolated(unsafe) private static let cardTimestampFormatter: DateFormatter = {
+    nonisolated private static let cardTimestampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "zh_CN")
         f.dateFormat = "MM/dd HH:mm"

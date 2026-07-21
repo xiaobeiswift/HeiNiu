@@ -13,9 +13,9 @@ import AppKit
 struct BackupSettingsView: View {
     /// onSaved。
     @Environment(SettingsStore.self) private var settings
+    @Environment(KnowledgeStore.self) private var knowledge
     var onSaved: () -> Void = {}
 
-    @State private var includeAPIKeysOnExport = false
     @State private var importMode: SettingsImportMode = .merge
     @State private var importAPIKeys = true
 
@@ -56,15 +56,9 @@ struct BackupSettingsView: View {
 
             StudioCard(title: "导出", subtitle: "生成一份 JSON 配置包，可拷贝到 U 盘 / 网盘 / AirDrop") {
                 VStack(alignment: .leading, spacing: 14) {
-                    Toggle(isOn: $includeAPIKeysOnExport) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("导出时包含 API Key")
-                            Text("方便换机，但文件等同于密钥备份，请妥善保管，勿上传公开位置")
-                                .font(.caption)
-                                .foregroundStyle(AppTheme.textTertiary)
-                        }
-                    }
-                    .toggleStyle(.switch)
+                    Text("配置包不包含 API Key 或知识库内容。密钥需在新设备重新填写；知识资料请在知识库页面单独迁移。")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.textTertiary)
 
                     HStack(spacing: 10) {
                         Button {
@@ -105,8 +99,8 @@ struct BackupSettingsView: View {
 
                     Toggle(isOn: $importAPIKeys) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("若备份含 Key，一并写入钥匙串")
-                            Text("无 Key 的备份不会清空本机已有密钥（合并时）")
+                            Text("若旧版备份含 Key，一并写入钥匙串")
+                            Text("新版备份不含 Key；无 Key 的备份不会清空本机已有密钥（合并时）")
                                 .font(.caption)
                                 .foregroundStyle(AppTheme.textTertiary)
                         }
@@ -219,14 +213,12 @@ struct BackupSettingsView: View {
         defer { isBusy = false }
 
         do {
-            let data = try settings.exportBackupData(includeAPIKeys: includeAPIKeysOnExport)
+            let data = try settings.exportBackupData(includeAPIKeys: false)
             let panel = NSSavePanel()
             panel.canCreateDirectories = true
             panel.nameFieldStringValue = defaultExportFileName()
             panel.allowedContentTypes = [.json]
-            panel.message = includeAPIKeysOnExport
-                ? "将导出含 API Key 的配置包，请妥善保管"
-                : "将导出不含 API Key 的配置包"
+            panel.message = "将导出不含 API Key 和知识库内容的配置包"
 
             guard panel.runModal() == .OK, let url = panel.url else {
                 statusMessage = "已取消导出"
@@ -276,6 +268,7 @@ struct BackupSettingsView: View {
     /// 执行 `applyImport` 相关逻辑。
     private func applyImport(_ backup: SettingsBackup) {
         settings.importBackup(backup, mode: importMode, importAPIKeys: importAPIKeys)
+        knowledge.markAllPending()
         pendingBackup = nil
         statusMessage = importMode == .replace ? "已替换本机配置" : "已合并导入配置"
         statusOK = true
@@ -289,7 +282,6 @@ struct BackupSettingsView: View {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmm"
         let stamp = formatter.string(from: Date())
-        let suffix = includeAPIKeysOnExport ? "with-keys" : "no-keys"
-        return "黑妞短剧-settings-\(stamp)-\(suffix).json"
+        return "黑妞短剧-settings-\(stamp)-no-keys.json"
     }
 }

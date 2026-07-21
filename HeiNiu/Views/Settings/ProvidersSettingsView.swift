@@ -11,10 +11,14 @@ import SwiftUI
 struct ProvidersSettingsView: View {
     /// onSaved。
     @Environment(SettingsStore.self) private var settings
+    @Environment(KnowledgeStore.self) private var knowledge
     var onSaved: () -> Void = {}
 
     @State private var expandedID: UUID?
     @State private var pendingDelete: LLMProvider?
+    @State private var embeddingTestMessage: String?
+    @State private var testingEmbedding = false
+    @State private var rebuildingKnowledge = false
 
     /// SwiftUI 视图内容。
     var body: some View {
@@ -38,6 +42,8 @@ struct ProvidersSettingsView: View {
                 }
                 .buttonStyle(.plain)
             }
+
+            embeddingCard
 
             if settings.providers.isEmpty {
                 StudioCard {
@@ -77,7 +83,9 @@ struct ProvidersSettingsView: View {
             Button("删除", role: .destructive) {
                 if let id = pendingDelete?.id {
                     if expandedID == id { expandedID = nil }
+                    let wasEmbeddingProvider = settings.knowledgeEmbeddingProviderID == id
                     settings.deleteProvider(id: id)
+                    if wasEmbeddingProvider { knowledge.markAllPending() }
                     onSaved()
                 }
                 pendingDelete = nil
@@ -104,6 +112,88 @@ struct ProvidersSettingsView: View {
         onSaved()
     }
 
+    private var embeddingCard: some View {
+        StudioCard(title: "知识库嵌入模型", subtitle: "用于资料分块索引与流水线语义检索，调用 OpenAI 兼容 /embeddings。") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Text("服务商")
+                        .frame(width: 64, alignment: .leading)
+                        .foregroundStyle(AppTheme.textSecondary)
+                    Picker("服务商", selection: embeddingProviderBinding) {
+                        Text("未配置").tag(Optional<UUID>.none)
+                        ForEach(settings.providers.filter { $0.protocolType == .openAICompatible }) { provider in
+                            Text(provider.name).tag(Optional(provider.id))
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack(spacing: 12) {
+                    Text("模型 ID")
+                        .frame(width: 64, alignment: .leading)
+                        .foregroundStyle(AppTheme.textSecondary)
+                    TextField("例如 text-embedding-3-small", text: embeddingModelBinding)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(settings.knowledgeEmbeddingProviderID == nil)
+                }
+                HStack(spacing: 10) {
+                    Button(testingEmbedding ? "测试中…" : "测试嵌入") {
+                        Task {
+                            testingEmbedding = true
+                            defer { testingEmbedding = false }
+                            do {
+                                let dimension = try await knowledge.testEmbedding(settings: settings)
+                                embeddingTestMessage = "连接成功 · \(dimension) 维"
+                            } catch {
+                                embeddingTestMessage = error.localizedDescription
+                            }
+                        }
+                    }
+                    .disabled(testingEmbedding || settings.knowledgeEmbeddingProviderID == nil || settings.knowledgeEmbeddingModel.isEmpty)
+
+                    Button(rebuildingKnowledge ? "重建中…" : "重建全部索引") {
+                        Task {
+                            rebuildingKnowledge = true
+                            await knowledge.reindexAll(settings: settings)
+                            rebuildingKnowledge = false
+                        }
+                    }
+                    .disabled(rebuildingKnowledge || knowledge.documents.isEmpty)
+
+                    if let embeddingTestMessage {
+                        Text(embeddingTestMessage)
+                            .font(.caption)
+                            .foregroundStyle(AppTheme.textTertiary)
+                    }
+                }
+            }
+        }
+    }
+
+    private var embeddingProviderBinding: Binding<UUID?> {
+        Binding(
+            get: { settings.knowledgeEmbeddingProviderID },
+            set: { providerID in
+                settings.setKnowledgeEmbedding(providerID: providerID, model: settings.knowledgeEmbeddingModel)
+                knowledge.markAllPending()
+                embeddingTestMessage = nil
+                onSaved()
+            }
+        )
+    }
+
+    private var embeddingModelBinding: Binding<String> {
+        Binding(
+            get: { settings.knowledgeEmbeddingModel },
+            set: { model in
+                settings.setKnowledgeEmbedding(providerID: settings.knowledgeEmbeddingProviderID, model: model)
+                knowledge.markAllPending()
+                embeddingTestMessage = nil
+                onSaved()
+            }
+        )
+    }
+
 }
 
 // MARK: - Card
@@ -113,6 +203,7 @@ struct ProvidersSettingsView: View {
 /// `ProviderCard` 类型定义。
 private struct ProviderCard: View {
     @Environment(SettingsStore.self) private var settings
+    @Environment(KnowledgeStore.self) private var knowledge
 
     /// 按 ID 查找 LLM 服务商。
     let provider: LLMProvider
@@ -390,8 +481,12 @@ private struct ProviderCard: View {
         if cleaned.name.isEmpty { cleaned.name = "未命名服务商" }
         cleaned.baseURL = cleaned.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         draft = cleaned
+        let embeddingEndpointChanged = settings.knowledgeEmbeddingProviderID == cleaned.id
+            && (provider.effectiveBaseURL != cleaned.effectiveBaseURL
+                || provider.protocolType != cleaned.protocolType)
         settings.updateProvider(cleaned)
         settings.setAPIKey(apiKey, for: cleaned.id)
+        if embeddingEndpointChanged { knowledge.markAllPending() }
         onSaved()
     }
 

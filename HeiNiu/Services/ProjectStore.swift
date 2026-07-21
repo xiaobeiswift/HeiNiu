@@ -122,6 +122,40 @@ final class ProjectStore {
         save()
     }
 
+    /// 清除已删除知识集合/资料的项目引用。
+    func removeKnowledgeReferences(collectionID: UUID? = nil, documentID: UUID? = nil) {
+        var changed = false
+        for index in projects.indices {
+            if let collectionID, projects[index].knowledgeCollectionIDs.contains(collectionID) {
+                projects[index].knowledgeCollectionIDs.removeAll { $0 == collectionID }
+                changed = true
+            }
+            if let documentID, projects[index].knowledgeDocumentIDs.contains(documentID) {
+                projects[index].knowledgeDocumentIDs.removeAll { $0 == documentID }
+                changed = true
+            }
+        }
+        if changed { save() }
+    }
+
+    /// 清理知识库归档替换后已不存在的集合和资料引用。
+    func pruneKnowledgeReferences(validCollectionIDs: Set<UUID>, validDocumentIDs: Set<UUID>) {
+        var changed = false
+        for index in projects.indices {
+            let collections = projects[index].knowledgeCollectionIDs.filter(validCollectionIDs.contains)
+            let documents = projects[index].knowledgeDocumentIDs.filter(validDocumentIDs.contains)
+            if collections != projects[index].knowledgeCollectionIDs {
+                projects[index].knowledgeCollectionIDs = collections
+                changed = true
+            }
+            if documents != projects[index].knowledgeDocumentIDs {
+                projects[index].knowledgeDocumentIDs = documents
+                changed = true
+            }
+        }
+        if changed { save() }
+    }
+
     // MARK: - Pipeline
 
     /// 读取（或初始化）项目流水线。
@@ -171,6 +205,7 @@ final class ProjectStore {
         _ kind: PipelineStepKind,
         projectID: UUID,
         settings: SettingsStore,
+        knowledge: KnowledgeStore,
         options: PipelineStepOptions = .init()
     ) async throws -> ProjectPipeline {
         guard let project = project(id: projectID) else {
@@ -186,6 +221,7 @@ final class ProjectStore {
                 project: project,
                 pipeline: current,
                 settings: settings,
+                knowledge: knowledge,
                 options: options
             )
             savePipeline(next)

@@ -3,7 +3,9 @@
 /// 本文件属于黑妞短剧（HeiNiu）工程，文档注释遵循 DocC 格式，
 /// 可在 Xcode 中通过 Product → Build Documentation 浏览。
 
+import AppKit
 import Foundation
+import PDFKit
 import UniformTypeIdentifiers
 
 /// 从本地文件抽取文本。
@@ -51,7 +53,7 @@ enum TextExtractor {
             "swift", "py", "js", "ts", "tsx", "jsx", "html", "css",
             "xml", "yaml", "yml", "toml", "ini", "env", "sh", "zsh",
             "c", "h", "cpp", "m", "mm", "java", "kt", "go", "rs", "rb",
-            "prompt", "srt", "vtt", "fountain", "text", "rtf",
+            "prompt", "srt", "vtt", "fountain", "text",
         ]
 
         let looksText = textExtensions.contains(ext)
@@ -61,10 +63,9 @@ enum TextExtractor {
             || type?.conforms(to: .xml) == true
             || type?.conforms(to: .html) == true
             || type?.conforms(to: .commaSeparatedText) == true
-            || type?.conforms(to: .rtf) == true
             || ext.isEmpty
 
-        if looksText {
+        if looksText && ext != "rtf" {
             if let raw = readText(from: standardized) {
                 return Result(
                     text: truncate(raw, max: maxCharacters),
@@ -85,9 +86,43 @@ enum TextExtractor {
             }
         }
 
+        if type?.conforms(to: .rtf) == true || ext == "rtf" {
+            do {
+                let attributed = try NSAttributedString(
+                    url: standardized,
+                    options: [.documentType: NSAttributedString.DocumentType.rtf],
+                    documentAttributes: nil
+                )
+                return Result(
+                    text: truncate(attributed.string, max: maxCharacters),
+                    byteSize: size,
+                    mime: mime,
+                    didExtractContent: true,
+                    errorMessage: nil
+                )
+            } catch {
+                return Result(text: "【RTF 读取失败：\(name)】", byteSize: size, mime: mime, didExtractContent: false, errorMessage: error.localizedDescription)
+            }
+        }
+
         if type?.conforms(to: .pdf) == true || ext == "pdf" {
-            let note = "【PDF 文件：\(name)，\(size) 字节。当前版本请粘贴关键段落或导出为 txt/md。】"
-            return Result(text: note, byteSize: size, mime: "application/pdf", didExtractContent: false, errorMessage: "PDF 暂不解析")
+            if let text = PDFDocument(url: standardized)?.string,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return Result(text: truncate(text, max: maxCharacters), byteSize: size, mime: "application/pdf", didExtractContent: true, errorMessage: nil)
+            }
+            return Result(text: "【PDF 未包含可提取文本：\(name)】", byteSize: size, mime: "application/pdf", didExtractContent: false, errorMessage: "PDF 未包含文本（不支持 OCR）")
+        }
+
+        if ext == "docx" {
+            do {
+                let text = try extractDOCX(from: standardized)
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+                return Result(text: truncate(text, max: maxCharacters), byteSize: size, mime: mime, didExtractContent: true, errorMessage: nil)
+            } catch {
+                return Result(text: "【DOCX 读取失败：\(name)】", byteSize: size, mime: mime, didExtractContent: false, errorMessage: error.localizedDescription)
+            }
         }
         if type?.conforms(to: .image) == true {
             let note = "【图片：\(name)。当前以文本输入为主，请补充画面描述。】"
@@ -148,6 +183,28 @@ enum TextExtractor {
         return String(decoding: data, as: UTF8.self)
     }
 
+    private static func extractDOCX(from url: URL) throws -> String {
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("heiniu-docx-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        process.arguments = ["-x", "-k", url.path, temporary.path]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { throw CocoaError(.fileReadCorruptFile) }
+
+        let documentURL = temporary.appendingPathComponent("word/document.xml")
+        let data = try Data(contentsOf: documentURL)
+        let delegate = DOCXTextParserDelegate()
+        let parser = XMLParser(data: data)
+        parser.delegate = delegate
+        guard parser.parse() else { throw parser.parserError ?? CocoaError(.fileReadCorruptFile) }
+        return delegate.text
+    }
+
     private static func isMostlyPrintable(_ text: String) -> Bool {
         let sample = text.prefix(4000)
         guard !sample.isEmpty else { return false }
@@ -159,5 +216,32 @@ enum TextExtractor {
             }
         }
         return Double(bad) / Double(sample.count) < 0.05
+    }
+}
+
+private final class DOCXTextParserDelegate: NSObject, XMLParserDelegate {
+    private var parts: [String] = []
+    private var current = ""
+    private var readingText = false
+
+    var text: String { parts.joined(separator: "\n") }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        let name = qName ?? elementName
+        if name == "w:t" || name == "t" { readingText = true }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if readingText { current += string }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        let name = qName ?? elementName
+        if name == "w:t" || name == "t" { readingText = false }
+        if name == "w:p" || name == "p" {
+            let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { parts.append(trimmed) }
+            current = ""
+        }
     }
 }

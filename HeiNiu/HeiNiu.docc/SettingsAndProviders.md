@@ -13,6 +13,13 @@
 - ``ProvidersSettingsView``：默认折叠；右侧菜单「编辑 / 删除」  
 - 「获取模型列表」：`SettingsStore.fetchModels(for:)`  
 
+## 知识库嵌入
+
+- 在服务商设置中选择一个 OpenAI 兼容服务商并填写嵌入模型 ID
+- Base URL 与 API Key 复用所选服务商，索引请求发送到 `/embeddings`
+- “测试嵌入”会显示返回向量维度；更换服务商或模型后，现有资料标记为待重建
+- 可重建全部资料，也可在知识库详情中重试单条资料
+
 ## 提示词库
 
 - 分类：``PromptCategory``  

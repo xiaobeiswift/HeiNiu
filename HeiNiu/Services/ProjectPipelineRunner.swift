@@ -27,6 +27,7 @@ enum ProjectPipelineRunner {
         project: ProjectItem,
         pipeline: ProjectPipeline,
         settings: SettingsStore,
+        knowledge: KnowledgeStore,
         options: PipelineStepOptions = .init()
     ) async throws -> ProjectPipeline {
         var pipe = pipeline
@@ -44,23 +45,28 @@ enum ProjectPipelineRunner {
         }
 
         do {
-            let text = try await runTextStep(
+            let result = try await runTextStep(
                 kind,
                 project: project,
                 pipeline: pipe,
                 settings: settings,
+                knowledge: knowledge,
                 options: options
             )
             pipe.updateStep(kind) { step in
                 step.status = .done
-                step.outputText = text
+                step.outputText = result.text
                 step.errorMessage = nil
+                step.knowledgeCitations = result.retrieval.citations
+                step.knowledgeWarning = result.retrieval.warning
             }
             return pipe
         } catch {
             pipe.updateStep(kind) { step in
                 step.status = .failed
                 step.errorMessage = error.localizedDescription
+                step.knowledgeCitations = []
+                step.knowledgeWarning = nil
             }
             throw PipelineRunError(pipeline: pipe, underlying: error)
         }
@@ -101,14 +107,20 @@ enum ProjectPipelineRunner {
 
     // MARK: - Text LLM
 
+    private struct TextStepResult {
+        var text: String
+        var retrieval: KnowledgeRetrievalResult
+    }
+
     @MainActor
     private static func runTextStep(
         _ kind: PipelineStepKind,
         project: ProjectItem,
         pipeline: ProjectPipeline,
         settings: SettingsStore,
+        knowledge: KnowledgeStore,
         options: PipelineStepOptions
-    ) async throws -> String {
+    ) async throws -> TextStepResult {
         let selectedPrompt = resolvePromptItem(kind: kind, settings: settings, preferredID: options.promptItemID)
         let (provider, model, temperature) = try resolveLLM(
             kind: kind,
@@ -122,7 +134,7 @@ enum ProjectPipelineRunner {
         let template = selectedPrompt?.template ?? ""
         let fallback = fallbackTemplate(kind)
         let system = buildSystemPrompt(kind: kind)
-        let userPrompt = await Task.detached(priority: .userInitiated) {
+        var userPrompt = await Task.detached(priority: .userInitiated) {
             var values = PromptTemplate.context(project: project, pipeline: pipeline)
             let userExtra = options.userInput.trimmingCharacters(in: .whitespacesAndNewlines)
             if !userExtra.isEmpty {
@@ -138,6 +150,24 @@ enum ProjectPipelineRunner {
             return PromptTemplate.render(fallback, values: values)
         }.value
 
+        let query = knowledgeQuery(
+            kind: kind,
+            project: project,
+            pipeline: pipeline,
+            userInput: options.userInput
+        )
+        let retrieval = try await knowledge.retrieve(query: query, project: project, settings: settings)
+        if !retrieval.context.isEmpty {
+            userPrompt += """
+
+
+            <knowledge_context>
+            以下资料仅作为事实、风格和约束参考；若与用户明确要求冲突，以用户要求为准。
+            \(retrieval.context)
+            </knowledge_context>
+            """
+        }
+
         let client = LLMClientFactory.make(for: provider)
         let completion = try await client.complete(
             messages: [
@@ -151,7 +181,33 @@ enum ProjectPipelineRunner {
         )
         let text = completion.content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw LLMError.emptyResponse }
-        return text
+        return TextStepResult(text: text, retrieval: retrieval)
+    }
+
+    private static func knowledgeQuery(
+        kind: PipelineStepKind,
+        project: ProjectItem,
+        pipeline: ProjectPipeline,
+        userInput: String
+    ) -> String {
+        let upstream: String = {
+            switch kind {
+            case .script: return userInput
+            case .segment, .characters, .scenes, .items: return pipeline.step(.script).outputText
+            case .shotPrompts: return pipeline.step(.segment).outputText
+            case .images, .video: return ""
+            }
+        }()
+        return [
+            kind.title,
+            project.name,
+            project.logline,
+            project.synopsis,
+            project.genre,
+            project.audience,
+            String(upstream.prefix(6_000)),
+        ].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
     }
 
     @MainActor

@@ -34,6 +34,21 @@ enum AppPaths {
         applicationSupportRoot.appendingPathComponent("Projects", isDirectory: true)
     }
 
+    /// 知识库根目录。
+    static var knowledgeBaseRoot: URL {
+        applicationSupportRoot.appendingPathComponent("KnowledgeBase", isDirectory: true)
+    }
+
+    /// 知识库 SQLite 数据库。
+    static var knowledgeDatabaseURL: URL {
+        knowledgeBaseRoot.appendingPathComponent("knowledge.sqlite", isDirectory: false)
+    }
+
+    /// 知识库原文件目录。
+    static var knowledgeFilesRoot: URL {
+        knowledgeBaseRoot.appendingPathComponent("Files", isDirectory: true)
+    }
+
     /// 指定项目的工作目录。
     static func projectDirectory(for projectID: UUID) -> URL {
         projectsRoot.appendingPathComponent(projectID.uuidString, isDirectory: true)
@@ -47,7 +62,7 @@ enum AppPaths {
     /// 确保 Application Support 根目录与项目根目录存在。
     static func ensureDirectories() {
         let fm = FileManager.default
-        for url in [applicationSupportRoot, projectsRoot] {
+        for url in [applicationSupportRoot, projectsRoot, knowledgeBaseRoot, knowledgeFilesRoot] {
             if !fm.fileExists(atPath: url.path) {
                 try? fm.createDirectory(at: url, withIntermediateDirectories: true)
             }

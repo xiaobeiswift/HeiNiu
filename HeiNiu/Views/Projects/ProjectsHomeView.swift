@@ -29,11 +29,13 @@ private enum ProjectHomeFilter: String, CaseIterable, Identifiable {
 /// 点卡片进入详情；v1 无集数实体。
 struct ProjectsHomeView: View {
     @Environment(ProjectStore.self) private var projects
+    @Environment(KnowledgeStore.self) private var knowledge
 
     @State private var selectedID: UUID?
     @State private var filter: ProjectHomeFilter = .all
     @State private var editorItem: ProjectItem?
     @State private var pendingDelete: ProjectItem?
+    @State private var knowledgePickerItem: ProjectItem?
     /// 新建：只填名称。
     @State private var showCreateSheet = false
     @State private var newProjectName = ""
@@ -83,6 +85,13 @@ struct ProjectsHomeView: View {
                 selectedID = updated.id
             }
             .frame(width: 560, height: 620)
+        }
+        .sheet(item: $knowledgePickerItem) { item in
+            ProjectKnowledgePicker(project: item) { updated in
+                projects.updateProject(updated)
+                knowledgePickerItem = nil
+            }
+            .frame(width: 720, height: 620)
         }
         .confirmationDialog(
             "删除「\(pendingDelete?.name ?? "")」？",
@@ -433,6 +442,17 @@ struct ProjectsHomeView: View {
                 }
 
                 Spacer(minLength: 8)
+
+                Button {
+                    knowledgePickerItem = project
+                } label: {
+                    Label(
+                        "知识库 \(project.knowledgeCollectionIDs.count + project.knowledgeDocumentIDs.count)",
+                        systemImage: "books.vertical"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .help("选择本项目可检索的知识集合与资料")
 
                 Menu {
                     ForEach(ProjectStatus.allCases) { status in

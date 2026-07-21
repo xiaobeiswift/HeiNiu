@@ -135,5 +135,6 @@ struct SettingsView: View {
 #Preview {
     SettingsView()
         .environment(SettingsStore())
+        .environment(KnowledgeStore())
         .frame(width: 960, height: 720)
 }

@@ -15,6 +15,8 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     case storyboards
     /// 资产库。
     case assets
+    /// 知识库。
+    case knowledge
     /// 设置。
     case settings
 
@@ -28,6 +30,7 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .scripts: "剧本"
         case .storyboards: "分镜"
         case .assets: "资产库"
+        case .knowledge: "知识库"
         case .settings: "设置"
         }
     }
@@ -39,12 +42,13 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
         case .scripts: "doc.text"
         case .storyboards: "rectangle.split.3x1"
         case .assets: "square.grid.2x2"
+        case .knowledge: "books.vertical"
         case .settings: "gearshape"
         }
     }
 
     /// 工作台模块。
-    static let workspaceItems: [SidebarItem] = [.projects, .scripts, .storyboards, .assets]
+    static let workspaceItems: [SidebarItem] = [.projects, .scripts, .storyboards, .assets, .knowledge]
 }
 
 /// 主窗口：工作台导航与详情。
@@ -159,6 +163,8 @@ struct MainView: View {
                 message: "管理角色、场景与道具等可复用资产。",
                 badge: "即将推出"
             )
+        case .knowledge:
+            KnowledgeHomeView()
         case .settings:
             SettingsView()
         case .none:
@@ -171,5 +177,6 @@ struct MainView: View {
     MainView()
         .environment(SettingsStore())
         .environment(ProjectStore())
+        .environment(KnowledgeStore())
         .frame(width: 1180, height: 760)
 }
