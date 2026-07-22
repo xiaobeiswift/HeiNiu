@@ -169,6 +169,11 @@ struct ProvidersSettingsView: View {
                                 .font(.caption)
                                 .foregroundStyle(AppTheme.textTertiary)
                         }
+                        if provider.supportsWebSearch,
+                           provider.protocolType == .openAICompatible,
+                           provider.openAIAPIMode == .responses {
+                            StatusBadge(text: "联网补资料", style: .accent, systemImage: "globe")
+                        }
                     }
                 } else {
                     Text(settings.providers.isEmpty ? "请先添加 API 服务商。" : "请选择默认服务商和模型。")
@@ -431,6 +436,11 @@ private struct ProviderCard: View {
                     if draft.supportsVision {
                         StatusBadge(text: "视觉", style: .neutral, systemImage: "eye")
                     }
+                    if draft.supportsWebSearch,
+                       draft.protocolType == .openAICompatible,
+                       draft.openAIAPIMode == .responses {
+                        StatusBadge(text: "联网", style: .neutral, systemImage: "globe")
+                    }
                     HStack(spacing: 5) {
                         StatusDot(active: hasKey)
                         Text(hasKey ? "Key 已配置" : "未配置 Key")
@@ -515,6 +525,19 @@ private struct ProviderCard: View {
                     }
                 }
                 .toggleStyle(.switch)
+
+                if draft.protocolType == .openAICompatible,
+                   draft.openAIAPIMode == .responses {
+                    Toggle(isOn: $draft.supportsWebSearch) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("允许联网补资料")
+                            Text("本地知识库未命中产品时，允许 Responses 调用原生 Web Search；结果必须带来源")
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.textTertiary)
+                        }
+                    }
+                    .toggleStyle(.switch)
+                }
             }
 
             VStack(alignment: .leading, spacing: 12) {

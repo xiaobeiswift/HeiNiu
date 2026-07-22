@@ -96,6 +96,22 @@ private struct WorkflowKnowledgeSuspension: LocalizedError {
     }
 }
 
+/// 产品缺口联网补证的结果；失败会保留为待补资料，不会伪装成本地命中。
+private enum WorkflowWebResearchOutcome {
+    case unavailable(String)
+    case matched(KnowledgeSearchResult, WorkflowKnowledgeDocumentEvidence)
+    case insufficient(String)
+}
+
+/// 模型对网页资料做出的结构化产品结论；URL 只从 API 工具结果读取，不信任正文自报链接。
+private struct WorkflowWebProductClaim {
+    var status: String
+    var canonicalName: String
+    var identityLevel: WorkflowKnowledgeIdentityLevel
+    var confirmedFacts: [String]
+    var unknowns: [String]
+}
+
 /// 工作流运行控制器。
 @Observable
 @MainActor
@@ -1097,7 +1113,7 @@ final class WorkflowExecutor {
                     throw error
                 }
             }
-            let candidate = results.compactMap { result -> (KnowledgeSearchResult, WorkflowKnowledgeDocumentEvidence)? in
+            var candidate = results.compactMap { result -> (KnowledgeSearchResult, WorkflowKnowledgeDocumentEvidence)? in
                 guard let evidence = knowledge.documentEvidence(id: result.documentID),
                       Self.matches(requirement: requirement, evidence: evidence)
                 else { return nil }
@@ -1108,12 +1124,52 @@ final class WorkflowExecutor {
                 if lhsHasImage != rhsHasImage { return !lhsHasImage && rhsHasImage }
                 return lhs.0.score < rhs.0.score
             }
+            var gapDetail: String?
+            if candidate == nil, requirement.category == .product {
+                switch await researchProductKnowledge(
+                    requirement: requirement,
+                    node: node,
+                    runID: runID,
+                    settings: settings,
+                    store: store
+                ) {
+                case .matched(let result, let evidence):
+                    candidate = (result, evidence)
+                case .unavailable(let message), .insufficient(let message):
+                    gapDetail = message
+                }
+            }
             if let candidate {
-                matched.append((requirement, candidate.0, candidate.1))
+                var resolvedRequirement = requirement
+                if Self.isProvisionalProductRequirement(requirement) {
+                    resolvedRequirement.name = candidate.1.title
+                    resolvedRequirement.identityLevel = .series
+                    resolvedRequirement.aliases = requirement.aliases.filter {
+                        !Self.isProvisionalProductName($0)
+                    }
+                    let boundary = "匹配边界：当前仅确认同一产品系列或用途类别；香型、品牌、SKU、具体型号和车型兼容性必须以资料明确证据为准，未证实字段不得写成确定事实。"
+                    if !resolvedRequirement.role.contains(boundary) {
+                        resolvedRequirement.role = [resolvedRequirement.role, boundary]
+                            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                            .joined(separator: "\n")
+                    }
+                    appendWarning(
+                        "“\(requirement.name)”仅按产品系列资料“\(candidate.1.title)”继续；品牌、SKU、香型和适配版本仍按证据边界处理",
+                        runID: runID,
+                        store: store
+                    )
+                }
+                matched.append((resolvedRequirement, candidate.0, candidate.1))
             } else {
+                let baseMessage = Self.isProvisionalProductRequirement(requirement)
+                    ? "知识库中没有与产品系列、用途和检索锚点匹配的已索引资料"
+                    : "知识库中没有标题、标签或正文准确匹配“\(name)”的已索引资料"
                 gaps.append(WorkflowKnowledgeGap(
                     requirement: requirement,
-                    message: "知识库中没有标题、标签或正文准确匹配“\(name)”的已索引资料"
+                    message: [baseMessage, gapDetail]
+                        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "；")
                 ))
             }
         }
@@ -1174,6 +1230,184 @@ final class WorkflowExecutor {
         ]
     }
 
+    /// 本地知识库未命中产品时，使用已明确开启的 Responses Web Search 服务商补证。
+    /// 普通聊天回答、无来源回答或无法确认身份级别的回答都会保留为知识缺口。
+    private func researchProductKnowledge(
+        requirement: WorkflowKnowledgeRequirement,
+        node: WorkflowNode,
+        runID: UUID,
+        settings: SettingsStore,
+        store: WorkflowStore
+    ) async -> WorkflowWebResearchOutcome {
+        let preferredProvider = settings.effectiveLLMProvider(for: node.configuration.providerID)
+        var providers: [LLMProvider] = []
+        if let preferredProvider { providers.append(preferredProvider) }
+        let additionalProviders = settings.providers.filter { provider in
+            !providers.contains(where: { $0.id == provider.id })
+        }
+        providers.append(contentsOf: additionalProviders)
+        let capableProviders = providers.filter {
+            $0.supportsWebSearch
+                && $0.protocolType == .openAICompatible
+                && $0.openAIAPIMode == .responses
+        }
+        guard !capableProviders.isEmpty else {
+            return .unavailable("尚未配置可用的 Responses 联网补资料服务商")
+        }
+
+        var failures: [String] = []
+        for provider in capableProviders {
+            let model: String
+            if provider.id == preferredProvider?.id {
+                model = settings.effectiveLLMModel(
+                    providerID: node.configuration.providerID,
+                    model: node.configuration.model
+                )
+            } else if provider.id == settings.defaultLLMProviderID {
+                model = settings.defaultLLMModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            } else {
+                model = provider.models.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            }
+            let apiKey = settings.apiKey(for: provider.id)
+            guard !model.isEmpty, !apiKey.isEmpty else {
+                failures.append("“\(provider.name)”缺少模型或 API Key")
+                continue
+            }
+            let client = LLMClientFactory.make(for: provider)
+            guard let researcher = client as? any LLMWebResearching else {
+                failures.append("“\(provider.name)”不支持原生网页检索")
+                continue
+            }
+
+            updateNodeRun(
+                nodeID: node.id,
+                runID: runID,
+                store: store,
+                status: .running,
+                message: "本地知识库未命中，正在联网核验“\(requirement.name)”",
+                persist: true
+            )
+            do {
+                let result = try await researcher.researchWeb(
+                    messages: Self.webResearchMessages(for: requirement),
+                    model: model,
+                    temperature: 0,
+                    reasoningEffort: .low,
+                    apiKey: apiKey
+                )
+                guard let claim = Self.parseWebProductClaim(result.content) else {
+                    failures.append("“\(provider.name)”联网回答不是可核验的结构化产品结论")
+                    continue
+                }
+                guard ["verified", "partial"].contains(claim.status.lowercased()),
+                      claim.identityLevel != .unknown,
+                      !claim.canonicalName.isEmpty,
+                      !claim.confirmedFacts.isEmpty
+                else {
+                    failures.append("网页来源不足以确认“\(requirement.name)”")
+                    continue
+                }
+                if !Self.isProvisionalProductRequirement(requirement) {
+                    let exactIdentities = ([requirement.name] + requirement.aliases)
+                        .map(Self.normalizedIdentityText)
+                        .filter { !$0.isEmpty }
+                    guard claim.identityLevel == .exact,
+                          exactIdentities.contains(Self.normalizedIdentityText(claim.canonicalName))
+                    else {
+                        failures.append("网页只确认到相近系列，未确认精确商品“\(requirement.name)”")
+                        continue
+                    }
+                }
+
+                let sourceLines = result.sources.map { source in
+                    "- \(source.title)：\(source.url.absoluteString)"
+                }.joined(separator: "\n")
+                let unknownLine = claim.unknowns.isEmpty
+                    ? "无额外未知项"
+                    : claim.unknowns.joined(separator: "；")
+                let content = """
+                联网补证级别：\(claim.identityLevel.rawValue)
+                已确认事实：
+                \(claim.confirmedFacts.map { "- \($0)" }.joined(separator: "\n"))
+                尚未确认：\(unknownLine)
+                网页来源：
+                \(sourceLines)
+                """
+                let documentID = UUID()
+                let evidence = WorkflowKnowledgeDocumentEvidence(
+                    documentID: documentID,
+                    title: claim.canonicalName,
+                    tags: ["产品", "联网补证", "证据级别-\(claim.identityLevel.rawValue)"],
+                    content: content,
+                    originalFileURL: nil
+                )
+                guard Self.matches(requirement: requirement, evidence: evidence) else {
+                    failures.append("联网来源与产品系列、用途或检索锚点仍不一致")
+                    continue
+                }
+                appendWarning(
+                    "“\(requirement.name)”本地资料未命中，已采用带 \(result.sources.count) 个来源的联网补证",
+                    runID: runID,
+                    store: store
+                )
+                let searchResult = KnowledgeSearchResult(
+                    chunkID: UUID(),
+                    documentID: documentID,
+                    documentTitle: claim.canonicalName,
+                    ordinal: 0,
+                    text: content,
+                    score: claim.identityLevel == .exact ? 0.700 : 0.550
+                )
+                return .matched(searchResult, evidence)
+            } catch is CancellationError {
+                return .insufficient("联网补证已取消")
+            } catch {
+                failures.append("“\(provider.name)”联网失败：\(error.localizedDescription)")
+            }
+        }
+        return .insufficient(failures.prefix(2).joined(separator: "；"))
+    }
+
+    private static func webResearchMessages(for requirement: WorkflowKnowledgeRequirement) -> [LLMChatMessage] {
+        let system = """
+        你是产品资料事实核验员。必须使用网页搜索工具核验，不得依赖记忆补全。
+        只输出一个 JSON 对象，不要 Markdown：
+        {"status":"verified|partial|insufficient","canonicalName":"网页可证实的正式商品名或稳定系列名","identityLevel":"exact|series|unknown","confirmedFacts":["逐条可由网页来源支持的事实"],"unknowns":["仍未证实的品牌、SKU、规格、香型或适配信息"]}
+        exact 仅用于品牌、正式商品名或唯一型号已由网页明确确认；只能确认类别、用途或产品系列时必须填 series；无法确认目标产品时填 insufficient 和 unknown。
+        不要把用户检索词、价格、卖点、香型对标和“型号未明确”等说明拼成商品名。兼容车型、规格、价格和性能没有网页证据时必须放入 unknowns。
+        """
+        let user = """
+        待核验产品描述：\(requirement.name)
+        身份级别：\(requirement.identityLevel.rawValue)
+        剧情用途：\(requirement.role)
+        别名：\(requirement.aliases.joined(separator: "、"))
+        建议检索词：\(requirement.searchTerms.joined(separator: "；"))
+        """
+        return [
+            LLMChatMessage(role: .system, content: system),
+            LLMChatMessage(role: .user, content: user),
+        ]
+    }
+
+    private static func parseWebProductClaim(_ text: String) -> WorkflowWebProductClaim? {
+        let json = jsonObjectText(from: text)
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let rawLevel = (object["identityLevel"] as? String) ?? "unknown"
+        let level = WorkflowKnowledgeIdentityLevel(rawValue: rawLevel) ?? .unknown
+        let facts = object["confirmedFacts"] as? [String] ?? []
+        let unknowns = object["unknowns"] as? [String] ?? []
+        return WorkflowWebProductClaim(
+            status: (object["status"] as? String) ?? "insufficient",
+            canonicalName: ((object["canonicalName"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            identityLevel: level,
+            confirmedFacts: facts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            unknowns: unknowns.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        )
+    }
+
     private static func jsonObjectText(from text: String) -> String {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let start = clean.firstIndex(of: "{"), let end = clean.lastIndex(of: "}"), start <= end else {
@@ -1223,13 +1457,27 @@ final class WorkflowExecutor {
         return nil
     }
 
-    private static func matches(
+    /// 严格身份核验；系列级或未命名产品按稳定用途锚点核验，避免把临时概括当成正式 SKU。
+    static func matches(
         requirement: WorkflowKnowledgeRequirement,
         evidence: WorkflowKnowledgeDocumentEvidence
     ) -> Bool {
         let haystack = normalizedIdentityText(([evidence.title] + evidence.tags + [evidence.content]).joined(separator: " "))
         if requirement.isGenericVehicleScene {
             return ["车内", "座舱", "汽车内饰", "驾驶舱"].contains { haystack.contains(normalizedIdentityText($0)) }
+        }
+        if isProvisionalProductRequirement(requirement) {
+            let hasProductEvidence = [
+                "产品", "商品", "品类", "型号", "包装", "product", "配件", "替换芯", "香氛芯", "陶瓷芯",
+            ].contains {
+                haystack.contains(normalizedIdentityText($0))
+            }
+            guard hasProductEvidence else { return false }
+            let anchors = productSeriesAnchors(requirement)
+            let matchedAnchors = anchors.filter(haystack.contains)
+            let productSpecificMatches = matchedAnchors.filter(isProductSpecificSeriesAnchor)
+            return productSpecificMatches.contains { $0.count >= 6 }
+                || (matchedAnchors.count >= 2 && !productSpecificMatches.isEmpty)
         }
         let identities = ([requirement.name] + requirement.aliases)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1243,6 +1491,60 @@ final class WorkflowExecutor {
             let text = evidence.title + "\n" + evidence.content
             return regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil
         }
+    }
+
+    /// 新版身份级别和旧运行中的“不明确”合成名都按系列证据处理。
+    private static func isProvisionalProductRequirement(_ requirement: WorkflowKnowledgeRequirement) -> Bool {
+        requirement.category == .product
+            && (requirement.identityLevel != .exact || isProvisionalProductName(requirement.name))
+    }
+
+    private static func isProvisionalProductName(_ name: String) -> Bool {
+        let normalized = normalizedIdentityText(name)
+        if normalized == normalizedIdentityText("文章未明确目标产品")
+            || normalized == normalizedIdentityText("未明确目标产品")
+            || normalized == normalizedIdentityText("未知产品") {
+            return true
+        }
+        return ["未明确", "未确认", "待确认", "未知", "不详", "不明"]
+            .map(normalizedIdentityText)
+            .contains(where: normalized.contains)
+    }
+
+    /// 从系列名称、用途和检索词中提取可由补库或联网资料命中的稳定语义锚点。
+    private static func productSeriesAnchors(_ requirement: WorkflowKnowledgeRequirement) -> [String] {
+        let separators = CharacterSet.whitespacesAndNewlines
+            .union(.punctuationCharacters)
+            .union(.symbols)
+        let ignored = Set([
+            "产品", "商品", "资料", "目标产品", "产品外观", "平替", "文章核心目标产品",
+        ].map(normalizedIdentityText))
+        let uncertaintyFragments = ["未明确", "未确认", "待确认", "未知", "不详", "不明"]
+            .map(normalizedIdentityText)
+        let source = [requirement.name] + requirement.aliases + requirement.searchTerms + [requirement.role]
+        var seen: Set<String> = []
+        return source
+            .flatMap { $0.components(separatedBy: separators) }
+            .map(normalizedIdentityText)
+            .filter { anchor in
+                guard anchor.count >= 2,
+                      !ignored.contains(anchor),
+                      !uncertaintyFragments.contains(where: anchor.contains),
+                      !seen.contains(anchor)
+                else { return false }
+                seen.insert(anchor)
+                return true
+            }
+    }
+
+    /// 排除只描述车型、座舱位置或价格的锚点，避免“同车型的任意产品”被当作目标系列。
+    private static func isProductSpecificSeriesAnchor(_ anchor: String) -> Bool {
+        let productIndicators = ["芯", "香氛", "替换", "陶瓷", "配件", "包装", "商品", "产品", "型号", "sku"]
+            .map(normalizedIdentityText)
+        if productIndicators.contains(where: anchor.contains) { return true }
+        let contextOnly = ["第三代es8", "中控台区域", "车内场景", "驾驶位", "副驾驶", "三十元", "九十元"]
+            .map(normalizedIdentityText)
+        return !contextOnly.contains(where: anchor.contains)
     }
 
     private static func normalizedIdentityText(_ text: String) -> String {

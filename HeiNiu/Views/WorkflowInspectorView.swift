@@ -273,7 +273,7 @@ private struct WorkflowNodeConfigurationView: View {
         case .knowledgePreparation:
             inspectorSection("严格知识核验") {
                 Stepper("每项检索最多 \(draft.configuration.topK) 个候选", value: $draft.configuration.topK, in: 1...12)
-                Text("逐个核验明确人物、产品和车型/座舱身份。没有准确匹配且带原图的资料时，父运行会暂停等待补库。")
+                Text("先查本地知识库：明确身份严格匹配，系列产品按用途锚点匹配并保留未确认边界；仍缺产品时可使用设置中已开启的 Responses 联网补资料。")
                     .font(.caption)
                     .foregroundStyle(AppTheme.textTertiary)
             }

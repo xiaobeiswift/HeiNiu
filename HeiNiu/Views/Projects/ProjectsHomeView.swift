@@ -33,7 +33,9 @@ struct ProjectsHomeView: View {
                     projectID: projectID,
                     onRerun: { requestRerun(projectID: projectID) },
                     onCancel: cancelRunningProject,
-                    onRetryKnowledge: { presentKnowledgeWizard(projectID: projectID) }
+                    onRetryKnowledge: { retryKnowledgeResolution(projectID: projectID) },
+                    isWorkflowBusy: executor.isRunning,
+                    workflowStatusMessage: executor.statusMessage
                 )
                 .sheet(item: detailSheetRequest) { request in
                     projectSheet(for: request)
@@ -212,8 +214,10 @@ struct ProjectsHomeView: View {
     }
 
     private func activeRun(for project: ProjectRecord) -> WorkflowRun? {
-        guard workflowStore.activeRun?.id == project.workflowRunID else { return nil }
-        return workflowStore.activeRun
+        guard let activeRun = workflowStore.activeRun,
+              activeRun.id == project.workflowRunID || activeRun.parentRunID == project.workflowRunID
+        else { return nil }
+        return activeRun
     }
 
     private func createAndRun(
@@ -398,18 +402,37 @@ struct ProjectsHomeView: View {
     }
 
     private func presentKnowledgeWizard(projectID: UUID) {
-        guard !executor.isRunning,
-              projectActionError == nil,
-              sheetRequest == nil,
-              let project = projectStore.project(id: projectID),
-              let runID = project.workflowRunID,
-              let parent = workflowStore.storedRun(workflowID: project.workflowID, runID: runID),
-              parent.status == .waitingForKnowledge,
-              let category = WorkflowKnowledgeCategory.allCases.first(where: { candidate in
-                  parent.pendingKnowledgeGaps.contains { $0.requirement.category == candidate }
-              }),
-              let baseWorkflow = workflowStore.workflow(id: WorkflowDefinition.knowledgeImportWorkflowID)
-        else { return }
+        guard !executor.isRunning else {
+            projectActionError = executor.statusMessage ?? "当前任务仍在处理，请等待状态更新后再继续补库。"
+            return
+        }
+        guard sheetRequest == nil else { return }
+        guard let project = projectStore.project(id: projectID) else {
+            projectActionError = "找不到这个项目，可能已经被删除。"
+            return
+        }
+        guard let runID = project.workflowRunID,
+              let parent = workflowStore.storedRun(workflowID: project.workflowID, runID: runID)
+        else {
+            projectActionError = "找不到项目关联的工作流运行记录。"
+            return
+        }
+        guard parent.status == .waitingForKnowledge else {
+            projectActionError = parent.status == .running
+                ? "主工作流已经恢复运行，无需再次补库。"
+                : "当前项目已不处于待补资料状态。"
+            return
+        }
+        guard let category = WorkflowKnowledgeCategory.allCases.first(where: { candidate in
+            parent.pendingKnowledgeGaps.contains { $0.requirement.category == candidate }
+        }) else {
+            projectActionError = "待补资料清单为空，暂时无法启动补库。请重新进入项目后再试。"
+            return
+        }
+        guard let baseWorkflow = workflowStore.workflow(id: WorkflowDefinition.knowledgeImportWorkflowID) else {
+            projectActionError = "找不到内置“添加知识库”工作流，无法继续补库。"
+            return
+        }
         var childWorkflow = baseWorkflow
         let gaps = parent.pendingKnowledgeGaps.filter { $0.requirement.category == category }
         let instructions = gaps.map { gap in
@@ -437,6 +460,34 @@ struct ProjectsHomeView: View {
                 workflow: childWorkflow
             )
         ))
+    }
+
+    /// 已等待的项目先用最新匹配规则重查本地资料并尝试联网；仍有缺口时执行器会再打开补库窗口。
+    private func retryKnowledgeResolution(projectID: UUID) {
+        guard !executor.isRunning else {
+            projectActionError = executor.statusMessage ?? "当前任务仍在处理，请稍后再试。"
+            return
+        }
+        guard let project = projectStore.project(id: projectID),
+              let runID = project.workflowRunID,
+              let parent = workflowStore.storedRun(workflowID: project.workflowID, runID: runID),
+              let workflow = workflowStore.workflow(id: project.workflowID),
+              parent.status == .waitingForKnowledge
+        else {
+            projectActionError = "当前项目没有可重新核验的待补资料运行。"
+            return
+        }
+        runningProjectID = projectID
+        workflowStore.activateRun(parent)
+        if !executor.resume(
+            workflow: workflow,
+            run: parent,
+            settings: settings,
+            knowledge: knowledge,
+            store: workflowStore
+        ) {
+            presentKnowledgeWizard(projectID: projectID)
+        }
     }
 
     private func startKnowledgeChild(
@@ -588,12 +639,87 @@ private struct ProjectCardView: View {
                 HStack {
                     Text(project.updatedAt.formatted(date: .abbreviated, time: .shortened))
                     Spacer()
-                    Label(project.status == .running ? "查看进度" : "查看项目", systemImage: "chevron.right")
+                    Label(
+                        project.status == .running || activeRun?.status == .running ? "查看进度" : "查看项目",
+                        systemImage: "chevron.right"
+                    )
                 }
                 .font(.caption2)
                 .foregroundStyle(AppTheme.textTertiary)
             }
         }
+    }
+}
+
+/// 在项目页按工作流顺序展示每个节点的实时状态与单节点进度。
+private struct WorkflowStepProgressView: View {
+    let run: WorkflowRun
+    let workflow: WorkflowDefinition?
+
+    private var processedNodeCount: Int {
+        run.nodeRuns.filter { nodeRun in
+            [.succeeded, .warning, .skipped, .failed, .cancelled].contains(nodeRun.status)
+        }.count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 6) {
+                ProgressView(
+                    value: Double(processedNodeCount),
+                    total: Double(max(1, run.nodeRuns.count))
+                )
+                .tint(AppTheme.accent)
+                Text("已处理 \(processedNodeCount) / \(run.nodeRuns.count) 个步骤")
+                    .font(.caption2)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+
+            ForEach(Array(run.nodeRuns.enumerated()), id: \.element.id) { index, nodeRun in
+                HStack(alignment: .top, spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(nodeRun.status.color.opacity(nodeRun.status == .pending ? 0.12 : 0.2))
+                            .frame(width: 26, height: 26)
+                        Image(systemName: nodeRun.status.systemImage)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(nodeRun.status.color)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text("\(index + 1)")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(AppTheme.textTertiary)
+                                .frame(minWidth: 16, alignment: .leading)
+                            Text(nodeTitle(for: nodeRun))
+                                .font(.callout.weight(nodeRun.status == .running || nodeRun.status == .waiting ? .semibold : .regular))
+                                .lineLimit(1)
+                            Spacer()
+                            Text(nodeRun.status.title)
+                                .font(.caption)
+                                .foregroundStyle(nodeRun.status.color)
+                        }
+                        if let message = nodeRun.message, !message.isEmpty {
+                            Text(message)
+                                .font(.caption2)
+                                .foregroundStyle(AppTheme.textSecondary)
+                                .lineLimit(2)
+                        }
+                        if let progress = nodeRun.progress,
+                           nodeRun.status == .running {
+                            ProgressView(value: min(max(progress, 0), 1))
+                                .tint(AppTheme.accent)
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+        }
+    }
+
+    private func nodeTitle(for nodeRun: WorkflowNodeRun) -> String {
+        workflow?.nodes.first(where: { $0.id == nodeRun.nodeID })?.displayTitle ?? "工作流步骤"
     }
 }
 
@@ -606,13 +732,25 @@ private struct ProjectDetailView: View {
     let onRerun: () -> Void
     let onCancel: () -> Void
     let onRetryKnowledge: () -> Void
+    let isWorkflowBusy: Bool
+    let workflowStatusMessage: String?
 
     private var project: ProjectRecord? { projectStore.project(id: projectID) }
-    private var run: WorkflowRun? {
-        guard workflowStore.activeRun?.id == project?.workflowRunID else { return nil }
+    private var parentRun: WorkflowRun? {
+        guard let project, let runID = project.workflowRunID else { return nil }
+        return workflowStore.storedRun(workflowID: project.workflowID, runID: runID)
+    }
+    private var activeKnowledgeRun: WorkflowRun? {
+        guard let parentRunID = project?.workflowRunID,
+              workflowStore.activeRun?.parentRunID == parentRunID
+        else { return nil }
         return workflowStore.activeRun
     }
     private var workflow: WorkflowDefinition? { workflowStore.workflow(id: project?.workflowID) }
+    private var knowledgeWorkflow: WorkflowDefinition? {
+        guard let workflowID = activeKnowledgeRun?.workflowID else { return nil }
+        return workflowStore.workflow(id: workflowID)
+    }
 
     var body: some View {
         Group {
@@ -667,24 +805,15 @@ private struct ProjectDetailView: View {
     private func runningContent(_ project: ProjectRecord) -> some View {
         StudioCard(title: "正在运行工作流", subtitle: "完成后会自动切换到分镜审核。") {
             VStack(alignment: .leading, spacing: 12) {
-                ProgressView()
-                    .controlSize(.large)
-                if let run {
-                    ForEach(run.nodeRuns) { nodeRun in
-                        HStack(spacing: 9) {
-                            Image(systemName: nodeRun.status.systemImage)
-                                .foregroundStyle(nodeRun.status == .failed ? AppTheme.danger : AppTheme.textSecondary)
-                                .frame(width: 18)
-                            Text(workflow?.nodes.first(where: { $0.id == nodeRun.nodeID })?.displayTitle ?? "节点")
-                            Spacer()
-                            Text(nodeRun.status.title)
-                                .font(.caption)
-                                .foregroundStyle(AppTheme.textTertiary)
-                        }
-                    }
+                if let parentRun {
+                    WorkflowStepProgressView(run: parentRun, workflow: workflow)
                 } else {
-                    Text("正在准备运行记录…")
-                        .foregroundStyle(AppTheme.textSecondary)
+                    HStack(spacing: 10) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(workflowStatusMessage ?? "正在准备运行记录…")
+                            .foregroundStyle(AppTheme.textSecondary)
+                    }
                 }
                 HStack {
                     Spacer()
@@ -700,24 +829,65 @@ private struct ProjectDetailView: View {
 
     private func waitingKnowledgeContent(_ project: ProjectRecord) -> some View {
         StudioCard(title: "等待补齐创作资料", subtitle: "补库完成后会从知识核验节点继续，不会重复调用已完成的要素提取。") {
-            VStack(alignment: .leading, spacing: 10) {
-                if let run {
-                    ForEach(run.pendingKnowledgeGaps) { gap in
-                        Label("\(gap.requirement.category.title)：\(gap.requirement.name)", systemImage: "books.vertical")
-                            .font(.callout.weight(.medium))
-                        Text(gap.message)
-                            .font(.caption)
-                            .foregroundStyle(AppTheme.textSecondary)
+            VStack(alignment: .leading, spacing: 16) {
+                if let activeKnowledgeRun {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            if activeKnowledgeRun.status == .running {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(activeKnowledgeRun.status == .running ? "正在执行补库工作流" : "补库工作流已处理")
+                                .font(.headline)
+                            Spacer()
+                            Text(activeKnowledgeRun.knowledgeGapCategory?.title ?? "资料")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(AppTheme.accent)
+                        }
+                        WorkflowStepProgressView(run: activeKnowledgeRun, workflow: knowledgeWorkflow)
+                    }
+                }
+
+                if let parentRun, !parentRun.pendingKnowledgeGaps.isEmpty {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("待补资料")
+                            .font(.headline)
+                        ForEach(parentRun.pendingKnowledgeGaps) { gap in
+                            Label("\(gap.requirement.category.title)：\(gap.requirement.name)", systemImage: "books.vertical")
+                                .font(.callout.weight(.medium))
+                            Text(gap.message)
+                                .font(.caption)
+                                .foregroundStyle(AppTheme.textSecondary)
+                        }
                     }
                 } else {
                     Text(project.lastError ?? "正在读取待补资料清单…")
                         .foregroundStyle(AppTheme.textSecondary)
                 }
+
+                if let parentRun {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("主工作流进度")
+                            .font(.headline)
+                        WorkflowStepProgressView(run: parentRun, workflow: workflow)
+                    }
+                }
+
                 HStack {
                     Spacer()
                     Button("取消项目", role: .destructive, action: onCancel)
-                    Button("继续补库", action: onRetryKnowledge)
-                        .buttonStyle(.borderedProminent)
+                    Button(action: onRetryKnowledge) {
+                        HStack(spacing: 7) {
+                            if isWorkflowBusy {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(isWorkflowBusy ? "正在处理…" : "重新核验并继续")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isWorkflowBusy)
+                    .help(isWorkflowBusy ? (workflowStatusMessage ?? "当前补库或恢复任务正在处理") : "先重查本地资料与联网补证，仍缺失时再打开补库窗口")
                 }
             }
         }

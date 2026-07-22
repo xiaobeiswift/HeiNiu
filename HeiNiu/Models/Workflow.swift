@@ -386,12 +386,12 @@ enum WorkflowNodeCatalog {
                 systemImage: "books.vertical.circle",
                 tint: .green,
                 usage: NodeUsageGuide(
-                    purpose: "读取要素提取 JSON，逐个检索全局知识库并严格核验明确身份；资料不足时暂停父运行，等待补库后从这里恢复。",
-                    setupSteps: ["连接要素提取模型的严格 JSON 输出。", "设置每项候选上限。", "确保知识资料已建立索引并保留原始图片。"],
+                    purpose: "读取要素提取 JSON，先核验本地知识库；产品缺口可调用已开启的 Responses 网页搜索。精确身份严格匹配，系列身份保留未确认边界。",
+                    setupSteps: ["连接带 identityLevel 的要素 JSON 输出。", "设置每项候选上限。", "确保本地资料已索引；需要自动联网时，在 Responses 服务商中开启联网补资料。"],
                     connectionExample: "LLM 要素提取 → 创作知识准备 → 规划提示词",
-                    resultDescription: "输出文字证据与稳定参考图清单；原图只复制到运行目录，不发送给规划模型。",
-                    commonErrors: ["JSON 格式不符合要素协议。", "明确人物、产品或车型没有准确匹配资料。"],
-                    warnings: ["检索会调用嵌入接口；资料缺失时父运行会进入待补资料状态。", "纯文字资料可以参与规划，但没有原图可挂到分镜卡片。"]
+                    resultDescription: "输出文字证据、未确认边界、网页来源与稳定参考图清单；原图只复制到运行目录，不发送给规划模型。",
+                    commonErrors: ["JSON 格式不符合要素协议。", "明确人物、精确产品或车型没有准确匹配资料。", "联网服务未开启、请求失败或回答没有真实来源。"],
+                    warnings: ["本地检索会调用嵌入接口；联网补证会产生额外模型调用。", "系列资料可以继续，但品牌、SKU、香型和适配信息仍以证据为准。", "纯文字或联网资料可以参与规划，但没有原图可挂到分镜卡片。"]
                 )
             ),
             WorkflowNodeDescriptor(
@@ -896,7 +896,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
     static let vehicleInteriorAdExtractionPromptTemplate = """
     从下面文章逐项提取制作汽车内广告分镜必须锁定的资料。只输出 JSON，不要 Markdown 或解释。
     JSON 结构必须是：
-    {"requirements":[{"id":"CHAR-1","category":"character","name":"规则解析后的真实视觉身份","role":"原文称呼、剧情角色、座位身份和规则映射说明","aliases":["该视觉身份的真实别名或规则指定参考文件名"],"searchTerms":["精确检索词"],"isGenericVehicleScene":false}]}
+    {"requirements":[{"id":"CHAR-1","category":"character","name":"规则解析后的真实视觉身份","role":"原文称呼、剧情角色、座位身份和规则映射说明","aliases":["该视觉身份的真实别名或规则指定参考文件名"],"searchTerms":["精确检索词"],"identityLevel":"exact","isGenericVehicleScene":false}]}
     requirements 必须是 JSON 对象数组，每一项都必须完整写成 {"id":...}，不能省略花括号或键名开头的双引号。
 
     规则处理原则：
@@ -906,7 +906,7 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
     4. 多条规则冲突时只执行正文明确给出的优先级；无法判定优先级时，不擅自合并或替代，保留文章明确身份以触发人工补资料。
     5. 没有适用强制规则时，保持文章身份，不用相似对象替代。
 
-    category 只能是 character、product、vehicleScene。每个规则解析后的明确人物、目标产品/型号、指定车型/座舱都必须单独一项。车型未指定时仍添加一项 name=通用汽车座舱、category=vehicleScene、isGenericVehicleScene=true。目标产品未指定时添加 name=文章未明确目标产品 的 product 项，使流程请求用户补充。按文章首次出现顺序输出。
+    category 只能是 character、product、vehicleScene。identityLevel 只能是 exact、series、unknown：人物和明确车型通常为 exact；只有文章或强制规则明确给出品牌、正式商品名或唯一型号的产品才可填 exact；只知道类别、用途、结构、香型对标或价格，但品牌、正式商品名、SKU、型号或适配版本仍不明确时填 series；文章根本没有目标产品时填 unknown。series 产品的 name 只写可由资料核验的稳定系列/类别名，不得把香型、价格、卖点和“品牌型号未明确”等说明拼成虚构商品名，未知项全部写进 role。每个规则解析后的明确人物、目标产品/型号、指定车型/座舱都必须单独一项。车型未指定时仍添加一项 name=通用汽车座舱、category=vehicleScene、identityLevel=exact、isGenericVehicleScene=true。目标产品未指定时添加 name=文章未明确目标产品、category=product、identityLevel=unknown 的项目，使流程按用途和检索词寻找用户补入的产品资料。按文章首次出现顺序输出。
 
     知识库候选规则：
     {{rules}}
@@ -1176,6 +1176,16 @@ enum WorkflowKnowledgeCategory: String, Codable, CaseIterable, Hashable, Sendabl
     }
 }
 
+/// 要素身份的证据精度，防止把模型概括出的系列描述误当成正式商品名。
+enum WorkflowKnowledgeIdentityLevel: String, Codable, CaseIterable, Hashable, Sendable {
+    /// 品牌、正式名称或唯一型号已明确，可执行严格身份匹配。
+    case exact
+    /// 只明确了产品系列、类别或用途，未锁定品牌、SKU、型号或适配版本。
+    case series
+    /// 原文没有给出可识别的目标产品。
+    case unknown
+}
+
 /// 要素提取模型输出的一项明确知识需求。
 struct WorkflowKnowledgeRequirement: Codable, Hashable, Sendable {
     var id: String
@@ -1184,6 +1194,7 @@ struct WorkflowKnowledgeRequirement: Codable, Hashable, Sendable {
     var role: String
     var aliases: [String]
     var searchTerms: [String]
+    var identityLevel: WorkflowKnowledgeIdentityLevel
     var isGenericVehicleScene: Bool
 
     init(
@@ -1193,6 +1204,7 @@ struct WorkflowKnowledgeRequirement: Codable, Hashable, Sendable {
         role: String = "",
         aliases: [String] = [],
         searchTerms: [String] = [],
+        identityLevel: WorkflowKnowledgeIdentityLevel = .exact,
         isGenericVehicleScene: Bool = false
     ) {
         self.id = id
@@ -1201,6 +1213,7 @@ struct WorkflowKnowledgeRequirement: Codable, Hashable, Sendable {
         self.role = role
         self.aliases = aliases
         self.searchTerms = searchTerms
+        self.identityLevel = identityLevel
         self.isGenericVehicleScene = isGenericVehicleScene
     }
 
@@ -1212,6 +1225,7 @@ struct WorkflowKnowledgeRequirement: Codable, Hashable, Sendable {
         role = try container.decodeIfPresent(String.self, forKey: .role) ?? ""
         aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
         searchTerms = try container.decodeIfPresent([String].self, forKey: .searchTerms) ?? []
+        identityLevel = try container.decodeIfPresent(WorkflowKnowledgeIdentityLevel.self, forKey: .identityLevel) ?? .exact
         isGenericVehicleScene = try container.decodeIfPresent(Bool.self, forKey: .isGenericVehicleScene) ?? false
     }
 }

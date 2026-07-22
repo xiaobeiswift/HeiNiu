@@ -140,6 +140,29 @@ struct LLMCompletion: Hashable, Sendable {
     }
 }
 
+/// Responses Web Search 返回的一条可核验网页来源。
+struct LLMWebSource: Hashable, Sendable {
+    var title: String
+    var url: URL
+}
+
+/// 一次带网页来源的研究结果；没有来源的普通模型回答不能构造为该类型。
+struct LLMWebResearchResult: Hashable, Sendable {
+    var content: String
+    var sources: [LLMWebSource]
+}
+
+/// 能调用服务商原生网页搜索工具的客户端能力。
+protocol LLMWebResearching: Sendable {
+    func researchWeb(
+        messages: [LLMChatMessage],
+        model: String,
+        temperature: Double,
+        reasoningEffort: ReasoningEffort,
+        apiKey: String
+    ) async throws -> LLMWebResearchResult
+}
+
 /// 流式补全事件。
 enum LLMStreamEvent: Sendable {
     /// 思考过程增量。

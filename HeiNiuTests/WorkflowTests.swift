@@ -1211,6 +1211,131 @@ final class WorkflowExecutorTests: XCTestCase {
     }
 
     @MainActor
+    func testUnspecifiedProductRequirementMatchesSupplementedProductAnchors() {
+        let requirement = WorkflowKnowledgeRequirement(
+            id: "PROD-1",
+            category: .product,
+            name: "文章未明确目标产品",
+            role: "剧情目标产品为蔚来第三代ES8中控台区域的车载香氛平替",
+            searchTerms: [
+                "蔚来第三代ES8 花漾一号平替车载香氛 陶瓷芯",
+                "车载香氛平替 三十元 陶瓷芯",
+            ]
+        )
+        let matching = WorkflowKnowledgeDocumentEvidence(
+            documentID: UUID(),
+            title: "蔚来第三代ES8车载香氛替换芯产品图",
+            tags: ["产品", "车载香氛", "中控台车载香氛平替", "约三十元"],
+            content: "这是一款陶瓷香氛替换芯，目标产品的品牌和型号仍待确认。",
+            originalFileURL: nil
+        )
+        let unrelated = WorkflowKnowledgeDocumentEvidence(
+            documentID: UUID(),
+            title: "护肤精华产品说明",
+            tags: ["产品", "护肤"],
+            content: "用于面部护理的商品资料。",
+            originalFileURL: nil
+        )
+
+        XCTAssertTrue(WorkflowExecutor.matches(requirement: requirement, evidence: matching))
+        XCTAssertFalse(WorkflowExecutor.matches(requirement: requirement, evidence: unrelated))
+    }
+
+    @MainActor
+    func testLegacyProvisionalProductDescriptionMatchesSeriesEvidence() {
+        let requirement = WorkflowKnowledgeRequirement(
+            id: "PROD-1",
+            category: .product,
+            name: "花漾一号香型陶瓷香氛平替芯（品牌与具体型号未明确）",
+            role: "安装于车辆香氛装置中的陶瓷芯平替；正文未明确品牌、商品名、适配版本或包装规格",
+            searchTerms: [
+                "花漾一号香型 陶瓷香氛平替芯",
+                "车载陶瓷香氛替换芯 花漾一号",
+                "蔚来第三代ES8 香氛平替芯",
+            ]
+        )
+        let evidence = WorkflowKnowledgeDocumentEvidence(
+            documentID: UUID(),
+            title: "蔚来车载陶瓷香氛替换芯 1.0/2.0/2.5通用六香型展示图",
+            tags: ["产品", "陶瓷香氛替换芯", "花漾1号"],
+            content: "卖家展示页标注蔚来1.0/2.0/2.5通用陶瓷香氛替换芯，并展示花漾1号；未证明第三代ES8适配。",
+            originalFileURL: nil
+        )
+
+        XCTAssertTrue(WorkflowExecutor.matches(requirement: requirement, evidence: evidence))
+    }
+
+    @MainActor
+    func testExactProductRequirementDoesNotDowngradeToSeriesMatch() {
+        let requirement = WorkflowKnowledgeRequirement(
+            id: "PROD-EXACT",
+            category: .product,
+            name: "云杉品牌 XF-100 花漾一号香氛芯",
+            searchTerms: ["车载陶瓷香氛替换芯"],
+            identityLevel: .exact
+        )
+        let genericSeries = WorkflowKnowledgeDocumentEvidence(
+            documentID: UUID(),
+            title: "车载陶瓷香氛替换芯系列",
+            tags: ["产品", "陶瓷香氛替换芯"],
+            content: "系列资料没有出现云杉品牌或XF-100型号。",
+            originalFileURL: nil
+        )
+
+        XCTAssertFalse(WorkflowExecutor.matches(requirement: requirement, evidence: genericSeries))
+    }
+
+    @MainActor
+    func testSeriesProductRejectsDifferentProductFromSameVehicle() {
+        let requirement = WorkflowKnowledgeRequirement(
+            id: "PROD-SERIES",
+            category: .product,
+            name: "车载陶瓷香氛替换芯",
+            role: "蔚来第三代ES8中控台使用",
+            searchTerms: ["蔚来第三代ES8", "陶瓷香氛替换芯"],
+            identityLevel: .series
+        )
+        let unrelated = WorkflowKnowledgeDocumentEvidence(
+            documentID: UUID(),
+            title: "蔚来第三代ES8全包围脚垫",
+            tags: ["产品", "蔚来第三代ES8", "汽车脚垫"],
+            content: "用于第三代ES8车内的脚垫产品。",
+            originalFileURL: nil
+        )
+
+        XCTAssertFalse(WorkflowExecutor.matches(requirement: requirement, evidence: unrelated))
+    }
+
+    @MainActor
+    func testKnowledgeRequirementIdentityLevelDecodesLegacyAndExplicitValues() throws {
+        let legacy = try JSONDecoder().decode(
+            WorkflowKnowledgeRequirement.self,
+            from: Data(#"{"id":"P1","category":"product","name":"明确产品"}"#.utf8)
+        )
+        let series = try JSONDecoder().decode(
+            WorkflowKnowledgeRequirement.self,
+            from: Data(#"{"id":"P2","category":"product","name":"香氛替换芯","identityLevel":"series"}"#.utf8)
+        )
+
+        XCTAssertEqual(legacy.identityLevel, .exact)
+        XCTAssertEqual(series.identityLevel, .series)
+    }
+
+    @MainActor
+    func testResponsesWebResearchParserRequiresAndDeduplicatesSources() throws {
+        let data = Data(#"{"output_text":"有来源的产品核验","output":[{"type":"web_search_call","action":{"sources":[{"type":"url","url":"https://example.com/product","title":"商品页"}]}},{"type":"message","content":[{"type":"output_text","text":"有来源的产品核验","annotations":[{"type":"url_citation","url":"https://example.com/product","title":"重复来源"}]}]}]}"#.utf8)
+        let result = try OpenAICompatibleClient.parseWebResearchResponse(data: data)
+
+        XCTAssertEqual(result.content, "有来源的产品核验")
+        XCTAssertEqual(result.sources.count, 1)
+        XCTAssertEqual(result.sources.first?.title, "商品页")
+        XCTAssertEqual(result.sources.first?.url.absoluteString, "https://example.com/product")
+
+        let noSources = Data(#"{"output_text":"没有来源的普通回答","output":[]}"#.utf8)
+        XCTAssertThrowsError(try OpenAICompatibleClient.parseWebResearchResponse(data: noSources))
+    }
+
+    @MainActor
     func testKnowledgeGapPausesPersistsAndResumeReusesCompletedNodes() async throws {
         let root = try temporaryDirectory()
         let sourceRoot = try temporaryDirectory()

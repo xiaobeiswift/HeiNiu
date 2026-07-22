@@ -124,6 +124,8 @@ struct LLMProvider: Identifiable, Codable, Hashable {
     var models: [String]
     /// 是否支持视觉（多模态图片输入）。
     var supportsVision: Bool
+    /// 是否允许 Responses API 使用原生 Web Search 工具。
+    var supportsWebSearch: Bool
 
     /// 创建服务商。
     /// - Parameters:
@@ -134,6 +136,7 @@ struct LLMProvider: Identifiable, Codable, Hashable {
     ///   - baseURL: 为空时使用协议默认地址。
     ///   - models: 为空时使用协议默认模型。
     ///   - supportsVision: 是否支持视觉。
+    ///   - supportsWebSearch: 是否允许工作流缺资料时调用原生 Web Search。
     init(
         id: UUID = UUID(),
         name: String,
@@ -141,7 +144,8 @@ struct LLMProvider: Identifiable, Codable, Hashable {
         openAIAPIMode: OpenAICompatibleAPIMode = .chatCompletions,
         baseURL: String? = nil,
         models: [String]? = nil,
-        supportsVision: Bool = true
+        supportsVision: Bool = true,
+        supportsWebSearch: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -150,6 +154,7 @@ struct LLMProvider: Identifiable, Codable, Hashable {
         self.baseURL = baseURL ?? protocolType.defaultBaseURL
         self.models = models ?? protocolType.defaultModels
         self.supportsVision = supportsVision
+        self.supportsWebSearch = supportsWebSearch
     }
 
     /// 去掉首尾空白与尾部 `/` 后的有效 Base URL。
@@ -179,6 +184,7 @@ struct LLMProvider: Identifiable, Codable, Hashable {
         baseURL = try container.decodeIfPresent(String.self, forKey: .baseURL) ?? protocolType.defaultBaseURL
         models = try container.decodeIfPresent([String].self, forKey: .models) ?? protocolType.defaultModels
         supportsVision = try container.decodeIfPresent(Bool.self, forKey: .supportsVision) ?? true
+        supportsWebSearch = try container.decodeIfPresent(Bool.self, forKey: .supportsWebSearch) ?? false
     }
 
     /// CodingKeys
@@ -186,6 +192,6 @@ struct LLMProvider: Identifiable, Codable, Hashable {
     /// `CodingKeys` 类型定义。
     private enum CodingKeys: String, CodingKey {
         /// 唯一标识符。
-        case id, name, protocolType, openAIAPIMode, baseURL, models, supportsVision
+        case id, name, protocolType, openAIAPIMode, baseURL, models, supportsVision, supportsWebSearch
     }
 }

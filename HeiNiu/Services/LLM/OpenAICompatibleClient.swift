@@ -17,7 +17,7 @@ import Foundation
 ///
 /// 由 ``LLMClientFactory`` 在 `protocolType == openAICompatible` 时创建。
 ///
-struct OpenAICompatibleClient: LLMClient {
+struct OpenAICompatibleClient: LLMClient, LLMWebResearching {
     /// API 根地址。
     let baseURL: String
     /// 模式。
@@ -92,6 +92,56 @@ struct OpenAICompatibleClient: LLMClient {
                 }
             }
         }
+    }
+
+    /// 使用 Responses API 原生 Web Search，并强制要求响应携带可核验 URL。
+    func researchWeb(
+        messages: [LLMChatMessage],
+        model: String,
+        temperature: Double,
+        reasoningEffort: ReasoningEffort,
+        apiKey: String
+    ) async throws -> LLMWebResearchResult {
+        guard mode == .responses else {
+            throw LLMError.underlying("联网补资料仅支持 OpenAI 兼容 Responses 模式")
+        }
+        guard let url = URL(string: "\(baseURL)/responses") else {
+            throw LLMError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 300
+
+        let systemText = messages
+            .filter { $0.role == .system }
+            .map(\.content)
+            .joined(separator: "\n\n")
+        let input = messages
+            .filter { $0.role != .system }
+            .map(Self.responsesMessagePayload)
+        var payload: [String: Any] = [
+            "model": model,
+            "temperature": temperature,
+            "input": input,
+            "tools": [["type": "web_search"]],
+            "tool_choice": "auto",
+            "include": ["web_search_call.action.sources"],
+            "store": false,
+        ]
+        if !systemText.isEmpty {
+            payload["instructions"] = systemText
+        }
+        if let effort = reasoningEffort.apiValue {
+            payload["reasoning"] = ["effort": effort, "summary": "auto"]
+        }
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.throwIfNeeded(data: data, response: response)
+        return try Self.parseWebResearchResponse(data: data)
     }
 
     // MARK: - Chat Completions
@@ -479,10 +529,12 @@ struct OpenAICompatibleClient: LLMClient {
 
         var contentParts: [String] = []
         var reasoningParts: [String] = []
+        var hasTopLevelOutputText = false
 
         if let text = obj["output_text"] as? String,
            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             contentParts.append(text)
+            hasTopLevelOutputText = true
         }
 
         if let r = LLMReasoningExtractor.reasoning(from: obj) {
@@ -502,11 +554,11 @@ struct OpenAICompatibleClient: LLMClient {
                         if ctype.contains("reasoning") || ctype.contains("thinking") {
                             if let t = c["text"] as? String { reasoningParts.append(t) }
                             if let t = c["thinking"] as? String { reasoningParts.append(t) }
-                        } else if let t = c["text"] as? String {
+                        } else if !hasTopLevelOutputText, let t = c["text"] as? String {
                             contentParts.append(t)
                         }
                     }
-                } else if let t = item["text"] as? String {
+                } else if !hasTopLevelOutputText, let t = item["text"] as? String {
                     contentParts.append(t)
                 }
             }
@@ -530,6 +582,58 @@ struct OpenAICompatibleClient: LLMClient {
             return LLMCompletion.make(content: r, reasoning: r)
         }
         return completion
+    }
+
+    /// 解析 Web Search 的回答和来源；没有真实 HTTP(S) 来源时拒绝降级为普通模型回答。
+    static func parseWebResearchResponse(data: Data) throws -> LLMWebResearchResult {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let completion = extractResponsesCompletion(from: data),
+              !completion.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { throw LLMError.decoding }
+
+        var sources: [LLMWebSource] = []
+        var seenURLs: Set<String> = []
+        func appendSource(urlText: String?, title: String?) {
+            guard let urlText,
+                  let url = URL(string: urlText),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+                  seenURLs.insert(url.absoluteString).inserted
+            else { return }
+            let cleanTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            sources.append(LLMWebSource(
+                title: cleanTitle.isEmpty ? (url.host ?? url.absoluteString) : cleanTitle,
+                url: url
+            ))
+        }
+
+        if let output = object["output"] as? [[String: Any]] {
+            for item in output {
+                if let action = item["action"] as? [String: Any],
+                   let actionSources = action["sources"] as? [[String: Any]] {
+                    for source in actionSources {
+                        appendSource(
+                            urlText: source["url"] as? String,
+                            title: source["title"] as? String
+                        )
+                    }
+                }
+                if let content = item["content"] as? [[String: Any]] {
+                    for part in content {
+                        let annotations = part["annotations"] as? [[String: Any]] ?? []
+                        for annotation in annotations where (annotation["type"] as? String) == "url_citation" {
+                            appendSource(
+                                urlText: annotation["url"] as? String,
+                                title: annotation["title"] as? String
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        guard !sources.isEmpty else {
+            throw LLMError.underlying("联网回答没有返回可核验的网页来源，已拒绝作为产品证据")
+        }
+        return LLMWebResearchResult(content: completion.content, sources: sources)
     }
 
     private static func emitResponsesItem(
