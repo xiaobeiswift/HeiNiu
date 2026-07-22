@@ -16,6 +16,9 @@ protocol WorkflowKnowledgeAccessing {
         limit: Int
     ) async throws -> [KnowledgeSearchResult]
 
+    /// 按资料 ID 读取严格身份核验与参考图复制所需的完整只读信息。
+    func documentEvidence(id: UUID) -> WorkflowKnowledgeDocumentEvidence?
+
     /// 保存工作流视觉模型生成的一条带原图资料。
     func addGeneratedFile(
         sourceURL: URL,
@@ -30,6 +33,8 @@ protocol WorkflowKnowledgeAccessing {
 }
 
 extension WorkflowKnowledgeAccessing {
+    func documentEvidence(id: UUID) -> WorkflowKnowledgeDocumentEvidence? { nil }
+
     func addGeneratedFile(
         sourceURL: URL,
         title: String,
@@ -46,6 +51,17 @@ extension WorkflowKnowledgeAccessing {
 }
 
 extension KnowledgeStore: WorkflowKnowledgeAccessing {
+    func documentEvidence(id: UUID) -> WorkflowKnowledgeDocumentEvidence? {
+        guard let document = document(id: id) else { return nil }
+        return WorkflowKnowledgeDocumentEvidence(
+            documentID: document.id,
+            title: document.title,
+            tags: document.tags,
+            content: document.content,
+            originalFileURL: originalFileURL(for: document)
+        )
+    }
+
     func indexGeneratedDocument(id: UUID, settings: SettingsStore) async -> KnowledgeIndexStatus {
         await indexDocument(id: id, settings: settings)
         return document(id: id)?.indexStatus ?? .failed
@@ -68,6 +84,15 @@ enum WorkflowExecutionError: LocalizedError {
         case .invalidValue(let message): message
         case .unavailableAdapter(let id): "媒体适配器“\(id)”未注册"
         }
+    }
+}
+
+/// 知识缺口不是执行失败，而是可持久化并可恢复的暂停信号。
+private struct WorkflowKnowledgeSuspension: LocalizedError {
+    var gaps: [WorkflowKnowledgeGap]
+
+    var errorDescription: String? {
+        "还缺少 \(gaps.count) 项创作资料"
     }
 }
 
@@ -102,7 +127,9 @@ final class WorkflowExecutor {
         runtimeInputs: [String: WorkflowValue],
         settings: SettingsStore,
         knowledge: any WorkflowKnowledgeAccessing,
-        store: WorkflowStore
+        store: WorkflowStore,
+        parentRunID: UUID? = nil,
+        knowledgeGapCategory: WorkflowKnowledgeCategory? = nil
     ) -> UUID? {
         guard !isRunning else { return nil }
         let validationWorkflow = WorkflowGraphAnalysis.scopedWorkflow(targetNodeID: targetNodeID, in: workflow)
@@ -137,10 +164,43 @@ final class WorkflowExecutor {
                 runtimeInputs: runtimeInputs,
                 settings: settings,
                 knowledge: knowledge,
-                store: store
+                store: store,
+                parentRunID: parentRunID,
+                knowledgeGapCategory: knowledgeGapCategory,
+                existingRun: nil
             )
         }
         return runID
+    }
+
+    /// 从知识准备节点恢复等待中的父运行，复用所有已完成节点输出。
+    @discardableResult
+    func resume(
+        workflow: WorkflowDefinition,
+        run: WorkflowRun,
+        settings: SettingsStore,
+        knowledge: any WorkflowKnowledgeAccessing,
+        store: WorkflowStore
+    ) -> Bool {
+        guard !isRunning, run.status == .waitingForKnowledge, run.workflowID == workflow.id else { return false }
+        isRunning = true
+        statusMessage = "正在重新核验知识资料"
+        runTask = Task { [weak self] in
+            guard let self else { return }
+            await self.performRun(
+                runID: run.id,
+                workflow: workflow,
+                targetNodeID: run.targetNodeID,
+                runtimeInputs: run.runtimeInputs,
+                settings: settings,
+                knowledge: knowledge,
+                store: store,
+                parentRunID: run.parentRunID,
+                knowledgeGapCategory: run.knowledgeGapCategory,
+                existingRun: run
+            )
+        }
+        return true
     }
 
     /// 停止本地执行与媒体轮询。
@@ -173,34 +233,59 @@ final class WorkflowExecutor {
         runtimeInputs: [String: WorkflowValue],
         settings: SettingsStore,
         knowledge: any WorkflowKnowledgeAccessing,
-        store: WorkflowStore
+        store: WorkflowStore,
+        parentRunID: UUID?,
+        knowledgeGapCategory: WorkflowKnowledgeCategory?,
+        existingRun: WorkflowRun?
     ) async {
         let relevant = relevantNodeIDs(targetNodeID: targetNodeID, workflow: workflow)
-        var run = WorkflowRun(
+        var run = existingRun ?? WorkflowRun(
             id: runID,
             workflowID: workflow.id,
             targetNodeID: targetNodeID,
             runtimeInputs: runtimeInputs,
-            nodes: workflow.nodes
+            nodes: workflow.nodes,
+            parentRunID: parentRunID,
+            knowledgeGapCategory: knowledgeGapCategory
         )
-        for index in run.nodeRuns.indices where !relevant.contains(run.nodeRuns[index].nodeID) {
-            run.nodeRuns[index].status = .skipped
-            run.nodeRuns[index].message = "不在本次运行范围内"
+        if existingRun == nil {
+            for index in run.nodeRuns.indices where !relevant.contains(run.nodeRuns[index].nodeID) {
+                run.nodeRuns[index].status = .skipped
+                run.nodeRuns[index].message = "不在本次运行范围内"
+            }
+        } else {
+            run.status = .running
+            run.pendingKnowledgeGaps = []
+            run.endedAt = nil
+            for index in run.nodeRuns.indices where run.nodeRuns[index].status == .waiting {
+                run.nodeRuns[index].status = .pending
+                run.nodeRuns[index].message = "补库完成，重新核验"
+                run.nodeRuns[index].endedAt = nil
+            }
         }
         do {
             try Task.checkCancellation()
-            let preparedRuntimeInputs = try prepareRuntimeInputs(
-                runtimeInputs,
-                workflowID: workflow.id,
-                runID: run.id,
-                store: store
-            )
+            let preparedRuntimeInputs = existingRun == nil
+                ? try prepareRuntimeInputs(runtimeInputs, workflowID: workflow.id, runID: run.id, store: store)
+                : run.runtimeInputs
             run.runtimeInputs = preparedRuntimeInputs
             store.saveRun(run)
             let loopComponents = WorkflowGraphAnalysis.loopComponents(in: workflow)
             let bodyNodeIDs = Set(loopComponents.flatMap { $0.nodeIDs.subtracting([$0.loopNodeID]) })
             var inputs: [UUID: [String: [WorkflowValue]]] = [:]
             var executed: Set<UUID> = []
+            if existingRun != nil {
+                for nodeRun in run.nodeRuns where [.succeeded, .warning].contains(nodeRun.status) {
+                    executed.insert(nodeRun.nodeID)
+                    propagate(
+                        outputs: nodeRun.outputs,
+                        from: nodeRun.nodeID,
+                        connections: workflow.connections,
+                        allowedTargets: relevant,
+                        into: &inputs
+                    )
+                }
+            }
             var madeProgress = true
 
             while madeProgress {
@@ -268,6 +353,9 @@ final class WorkflowExecutor {
             }
             finishRun(runID: run.id, store: store, status: currentRunHasWarnings(runID: run.id, store: store) ? .warning : .succeeded)
             statusMessage = currentRunHasWarnings(runID: run.id, store: store) ? "运行完成（有警告）" : "运行完成"
+        } catch let suspension as WorkflowKnowledgeSuspension {
+            suspendRun(runID: run.id, gaps: suspension.gaps, store: store)
+            statusMessage = suspension.localizedDescription
         } catch is CancellationError {
             cancelRun(runID: run.id, store: store)
             statusMessage = "运行已取消"
@@ -445,7 +533,9 @@ final class WorkflowExecutor {
                 nodeID: node.id,
                 runID: runID,
                 store: store,
-                status: error is CancellationError ? .cancelled : .failed,
+                status: error is WorkflowKnowledgeSuspension
+                    ? .waiting
+                    : (error is CancellationError ? .cancelled : .failed),
                 message: error.localizedDescription,
                 iteration: iteration,
                 persist: true
@@ -510,7 +600,7 @@ final class WorkflowExecutor {
                 throw WorkflowExecutionError.invalidValue("知识检索输入必须是文本")
             }
             let results = try await knowledge.search(
-                query: query,
+                query: Self.compactKnowledgeQuery(query),
                 settings: settings,
                 collectionID: node.configuration.collectionID,
                 tags: node.configuration.tags,
@@ -520,6 +610,20 @@ final class WorkflowExecutor {
                 "[\($0.documentTitle)#片段\($0.ordinal + 1) · \(String(format: "%.3f", $0.score))]\n\($0.text)"
             }.joined(separator: "\n\n")
             return ["context": .text(text)]
+
+        case .knowledgePreparation:
+            guard case .text(let requirementsJSON) = inputs["requirements"]?.first else {
+                throw WorkflowExecutionError.invalidValue("创作知识准备输入必须是要素 JSON")
+            }
+            return try await prepareCreationKnowledge(
+                requirementsJSON: requirementsJSON,
+                node: node,
+                workflow: workflow,
+                runID: runID,
+                settings: settings,
+                knowledge: knowledge,
+                store: store
+            )
 
         case .knowledgeImport:
             guard case .folder(let relativeFolder) = inputs["folder"]?.first,
@@ -949,6 +1053,229 @@ final class WorkflowExecutor {
         return !settings.apiKey(for: providerID).isEmpty
     }
 
+    // MARK: - Creation knowledge preparation
+
+    private func prepareCreationKnowledge(
+        requirementsJSON: String,
+        node: WorkflowNode,
+        workflow: WorkflowDefinition,
+        runID: UUID,
+        settings: SettingsStore,
+        knowledge: any WorkflowKnowledgeAccessing,
+        store: WorkflowStore
+    ) async throws -> [String: WorkflowValue] {
+        guard let envelope = Self.parseKnowledgeRequirements(from: requirementsJSON) else {
+            throw WorkflowExecutionError.invalidValue("要素提取结果不是有效 JSON，或没有列出任何创作要素")
+        }
+
+        var gaps: [WorkflowKnowledgeGap] = []
+        var matched: [(WorkflowKnowledgeRequirement, KnowledgeSearchResult, WorkflowKnowledgeDocumentEvidence)] = []
+        let candidateLimit = max(1, min(12, node.configuration.topK))
+        for requirement in envelope.requirements {
+            try Task.checkCancellation()
+            let name = requirement.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                gaps.append(WorkflowKnowledgeGap(requirement: requirement, message: "要素名称为空，无法精确检索"))
+                continue
+            }
+            let query = ([name] + requirement.aliases + requirement.searchTerms)
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: " ")
+            let results: [KnowledgeSearchResult]
+            do {
+                results = try await knowledge.search(
+                    query: query,
+                    settings: settings,
+                    collectionID: nil,
+                    tags: [],
+                    limit: candidateLimit
+                )
+            } catch {
+                if error.localizedDescription.contains("没有使用当前嵌入配置完成索引") {
+                    results = []
+                } else {
+                    throw error
+                }
+            }
+            let candidate = results.compactMap { result -> (KnowledgeSearchResult, WorkflowKnowledgeDocumentEvidence)? in
+                guard let evidence = knowledge.documentEvidence(id: result.documentID),
+                      Self.matches(requirement: requirement, evidence: evidence)
+                else { return nil }
+                return (result, evidence)
+            }.max { lhs, rhs in
+                let lhsHasImage = Self.isImageReference(lhs.1.originalFileURL)
+                let rhsHasImage = Self.isImageReference(rhs.1.originalFileURL)
+                if lhsHasImage != rhsHasImage { return !lhsHasImage && rhsHasImage }
+                return lhs.0.score < rhs.0.score
+            }
+            if let candidate {
+                matched.append((requirement, candidate.0, candidate.1))
+            } else {
+                gaps.append(WorkflowKnowledgeGap(
+                    requirement: requirement,
+                    message: "知识库中没有标题、标签或正文准确匹配“\(name)”的已索引资料"
+                ))
+            }
+        }
+        if !gaps.isEmpty { throw WorkflowKnowledgeSuspension(gaps: gaps) }
+
+        let referenceRoot = store.assetsDirectory(workflowID: workflow.id, runID: runID)
+            .appendingPathComponent("KnowledgeReferences", isDirectory: true)
+        try FileManager.default.createDirectory(at: referenceRoot, withIntermediateDirectories: true)
+        var categoryCounts: [WorkflowKnowledgeCategory: Int] = [:]
+        var contextParts: [String] = []
+        var entries: [WorkflowReferenceManifestEntry] = []
+        for (requirement, result, evidence) in matched {
+            contextParts.append("""
+            [\(requirement.category.title)｜\(requirement.name)｜资料：\(evidence.title)｜相似度：\(String(format: "%.3f", result.score))]
+            身份/用途：\(requirement.role.isEmpty ? "原文明确要素" : requirement.role)
+            标签：\(evidence.tags.joined(separator: "、"))
+            \(String(evidence.content.prefix(12_000)))
+            """)
+            guard let sourceURL = evidence.originalFileURL,
+                  Self.isImageReference(sourceURL)
+            else {
+                appendWarning("“\(requirement.name)”已命中文字资料，但没有可挂到分镜卡片的原始图片", runID: runID, store: store)
+                continue
+            }
+            categoryCounts[requirement.category, default: 0] += 1
+            let prefix: String
+            switch requirement.category {
+            case .character: prefix = "CHAR"
+            case .product: prefix = "PROD"
+            case .vehicleScene: prefix = "SCENE"
+            }
+            let referenceID = String(format: "%@-%02d", prefix, categoryCounts[requirement.category] ?? 1)
+            let ext = sourceURL.pathExtension.isEmpty ? "dat" : sourceURL.pathExtension.lowercased()
+            let destination = referenceRoot.appendingPathComponent(
+                "\(referenceID)-\(evidence.documentID.uuidString.prefix(8)).\(ext)",
+                isDirectory: false
+            )
+            if !FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.copyItem(at: sourceURL, to: destination)
+            }
+            entries.append(WorkflowReferenceManifestEntry(
+                referenceID: referenceID,
+                requirementID: requirement.id,
+                category: requirement.category,
+                documentID: evidence.documentID,
+                title: evidence.title,
+                relativePath: "Assets/KnowledgeReferences/\(destination.lastPathComponent)",
+                score: result.score
+            ))
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let manifestData = try encoder.encode(WorkflowReferenceManifest(entries: entries))
+        let manifestText = String(decoding: manifestData, as: UTF8.self)
+        return [
+            "context": .text(contextParts.joined(separator: "\n\n")),
+            "referenceManifest": .text(manifestText),
+        ]
+    }
+
+    private static func jsonObjectText(from text: String) -> String {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let start = clean.firstIndex(of: "{"), let end = clean.lastIndex(of: "}"), start <= end else {
+            return clean
+        }
+        return String(clean[start...end])
+    }
+
+    /// 解码模型提取的创作要素，并容忍第一个数组对象起始符被模型漏写的单一常见笔误。
+    ///
+    /// 修复只发生在 `requirements` 数组紧接 `id` 键时；其余无效内容仍会被拒绝，
+    /// 后续人物、产品和车型也仍逐项执行严格身份匹配。
+    static func parseKnowledgeRequirements(from text: String) -> WorkflowKnowledgeRequirements? {
+        let cleanJSON = jsonObjectText(from: text)
+        if let envelope = decodeKnowledgeRequirements(cleanJSON) {
+            return envelope
+        }
+        guard let repairedJSON = repairingFirstKnowledgeRequirement(in: cleanJSON) else {
+            return nil
+        }
+        return decodeKnowledgeRequirements(repairedJSON)
+    }
+
+    private static func decodeKnowledgeRequirements(_ text: String) -> WorkflowKnowledgeRequirements? {
+        guard let data = text.data(using: .utf8),
+              let envelope = try? JSONDecoder().decode(WorkflowKnowledgeRequirements.self, from: data),
+              !envelope.requirements.isEmpty
+        else { return nil }
+        return envelope
+    }
+
+    private static func repairingFirstKnowledgeRequirement(in text: String) -> String? {
+        let prefixPattern = #""requirements"\s*:\s*\[\s*"#
+        guard let prefixRange = text.range(of: prefixPattern, options: .regularExpression) else {
+            return nil
+        }
+        let remainder = text[prefixRange.upperBound...]
+        var repaired = text
+        if remainder.hasPrefix(#"id":"#) {
+            repaired.insert(contentsOf: "{\"", at: prefixRange.upperBound)
+            return repaired
+        }
+        if remainder.hasPrefix(#""id":"#) {
+            repaired.insert("{", at: prefixRange.upperBound)
+            return repaired
+        }
+        return nil
+    }
+
+    private static func matches(
+        requirement: WorkflowKnowledgeRequirement,
+        evidence: WorkflowKnowledgeDocumentEvidence
+    ) -> Bool {
+        let haystack = normalizedIdentityText(([evidence.title] + evidence.tags + [evidence.content]).joined(separator: " "))
+        if requirement.isGenericVehicleScene {
+            return ["车内", "座舱", "汽车内饰", "驾驶舱"].contains { haystack.contains(normalizedIdentityText($0)) }
+        }
+        let identities = ([requirement.name] + requirement.aliases)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return identities.contains { identity in
+            let normalized = normalizedIdentityText(identity)
+            if evidence.tags.contains(where: { normalizedIdentityText($0) == normalized }) { return true }
+            let escaped = NSRegularExpression.escapedPattern(for: identity)
+            let pattern = "(?<![\\p{L}\\p{N}])\(escaped)(?![\\p{L}\\p{N}])"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return false }
+            let text = evidence.title + "\n" + evidence.content
+            return regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil
+        }
+    }
+
+    private static func normalizedIdentityText(_ text: String) -> String {
+        text.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: .current)
+            .unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+            .lowercased()
+    }
+
+    /// 限制语义检索输入长度，防止长文章直接超出嵌入模型上下文。
+    ///
+    /// 同时保留首尾，让开场角色与结尾产品信息都能参与检索。
+    static func compactKnowledgeQuery(_ query: String, maxCharacters: Int = 6_000) -> String {
+        let clean = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let limit = max(200, maxCharacters)
+        guard clean.count > limit else { return clean }
+        let separator = "\n\n……中间内容已为知识检索压缩……\n\n"
+        let available = max(2, limit - separator.count)
+        let prefixCount = available / 2
+        let suffixCount = available - prefixCount
+        return String(clean.prefix(prefixCount)) + separator + String(clean.suffix(suffixCount))
+    }
+
+    /// 只把真实图片文件作为分镜参考图，避免将 Markdown/PDF 资料误复制进图片清单。
+    private static func isImageReference(_ url: URL?) -> Bool {
+        guard let url,
+              let type = UTType(filenameExtension: url.pathExtension)
+        else { return false }
+        return type.conforms(to: .image)
+    }
+
     // MARK: - Scheduling helpers
 
     private func relevantNodeIDs(targetNodeID: UUID?, workflow: WorkflowDefinition) -> Set<UUID> {
@@ -1088,7 +1415,7 @@ final class WorkflowExecutor {
         run.nodeRuns[index].progress = progress
         if let iteration { run.nodeRuns[index].iteration = iteration }
         if status == .running && previous != .running { run.nodeRuns[index].startedAt = Date() }
-        if [.succeeded, .warning, .failed, .cancelled, .skipped].contains(status) {
+        if [.waiting, .succeeded, .warning, .failed, .cancelled, .skipped].contains(status) {
             run.nodeRuns[index].endedAt = Date()
         }
         if persist { store.saveRun(run) } else { store.activeRun = run }
@@ -1135,6 +1462,14 @@ final class WorkflowExecutor {
         guard var run = store.activeRun, run.id == runID else { return }
         run.status = status
         run.endedAt = Date()
+        store.saveRun(run)
+    }
+
+    private func suspendRun(runID: UUID, gaps: [WorkflowKnowledgeGap], store: WorkflowStore) {
+        guard var run = store.activeRun, run.id == runID else { return }
+        run.status = .waitingForKnowledge
+        run.pendingKnowledgeGaps = gaps
+        run.endedAt = nil
         store.saveRun(run)
     }
 

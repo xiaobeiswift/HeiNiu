@@ -127,6 +127,129 @@ final class WorkflowModelTests: XCTestCase {
     }
 
     @MainActor
+    func testBuiltInVehicleInteriorAdWorkflowHasStableTopologyAndThreeLLMCalls() throws {
+        let workflow = WorkflowDefinition.vehicleInteriorAd()
+
+        XCTAssertEqual(workflow.id, UUID(uuidString: "ADD0A11B-0000-4B00-8000-000000000002"))
+        XCTAssertEqual(workflow.name, "汽车内广告分镜")
+        XCTAssertTrue(workflow.isBuiltIn)
+        XCTAssertEqual(workflow.nodes.filter { $0.kind == .llm }.count, 3)
+        XCTAssertEqual(workflow.nodes.filter { $0.kind == .knowledgeSearch }.count, 1)
+        XCTAssertEqual(workflow.nodes.filter { $0.kind == .knowledgePreparation }.count, 1)
+        XCTAssertEqual(WorkflowValidator.estimateCosts(workflow).llmCalls, 3)
+        let ruleQuery = try XCTUnwrap(workflow.nodes.first { $0.displayTitle == "创作规则检索提示" })
+        let ruleSearch = try XCTUnwrap(workflow.nodes.first { $0.displayTitle == "创作规则检索" })
+        XCTAssertTrue(ruleQuery.configuration.text.contains("{{article}}"))
+        XCTAssertFalse(ruleQuery.configuration.text.contains("林月"))
+        XCTAssertTrue(workflow.connections.contains {
+            $0.sourceNodeID == ruleQuery.id && $0.sourcePortID == "text" &&
+            $0.targetNodeID == ruleSearch.id && $0.targetPortID == "query"
+        })
+        for title in ["要素提取提示", "全片规划提示", "高推理审校提示"] {
+            let prompt = try XCTUnwrap(workflow.nodes.first { $0.displayTitle == title })
+            XCTAssertTrue(prompt.configuration.text.contains("{{rules}}"), "\(title) 必须接收通用规则")
+            XCTAssertTrue(workflow.connections.contains {
+                $0.sourceNodeID == ruleSearch.id && $0.sourcePortID == "context" &&
+                $0.targetNodeID == prompt.id && $0.targetPortID == "rules"
+            })
+        }
+        let knowledge = try XCTUnwrap(workflow.nodes.first { $0.kind == .knowledgePreparation })
+        let ports = knowledge.descriptor.ports(for: knowledge)
+        XCTAssertTrue(ports.contains { $0.id == "requirements" && $0.isRequired })
+        XCTAssertTrue(ports.contains { $0.id == "context" })
+        XCTAssertTrue(ports.contains { $0.id == "referenceManifest" })
+        XCTAssertTrue(workflow.connections.contains { $0.targetNodeID == knowledge.id && $0.targetPortID == "requirements" })
+        let review = try XCTUnwrap(workflow.nodes.first { $0.displayTitle == "高推理审校重写" })
+        XCTAssertEqual(review.configuration.reasoningEffort, .high)
+    }
+
+    @MainActor
+    func testLegacyVehicleWorkflowUpgradesToGenericRuleLayerAndPreservesNodeIDs() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeiNiuVehicleRuleMigration-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var legacy = WorkflowDefinition.vehicleInteriorAd()
+        let ruleNodeIDs = Set(legacy.nodes.filter {
+            $0.displayTitle == "创作规则检索提示" || $0.displayTitle == "创作规则检索"
+        }.map(\.id))
+        legacy.nodes.removeAll { ruleNodeIDs.contains($0.id) }
+        legacy.connections.removeAll {
+            ruleNodeIDs.contains($0.sourceNodeID) || ruleNodeIDs.contains($0.targetNodeID)
+        }
+        let preservedPromptIDs = Dictionary(uniqueKeysWithValues: legacy.nodes.compactMap { node in
+            ["要素提取提示", "全片规划提示", "高推理审校提示"].contains(node.displayTitle)
+                ? (node.displayTitle, node.id)
+                : nil
+        })
+        for index in legacy.nodes.indices where preservedPromptIDs.values.contains(legacy.nodes[index].id) {
+            legacy.nodes[index].configuration.text = "旧版提示 {{article}}"
+        }
+        legacy.isBuiltIn = false
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encodedWorkflow = try encoder.encode(legacy)
+        let workflowObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encodedWorkflow) as? [String: Any]
+        )
+        let legacyFile = try JSONSerialization.data(
+            withJSONObject: ["formatVersion": 3, "workflows": [workflowObject]],
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try legacyFile.write(to: root.appendingPathComponent("workflows.json"), options: .atomic)
+
+        let reloaded = WorkflowStore(rootURL: root)
+        let upgraded = try XCTUnwrap(reloaded.workflow(id: WorkflowDefinition.vehicleInteriorAdWorkflowID))
+        XCTAssertTrue(upgraded.isBuiltIn)
+        XCTAssertEqual(upgraded.nodes.filter { $0.kind == .knowledgeSearch }.count, 1)
+        let ruleSearch = try XCTUnwrap(upgraded.nodes.first { $0.displayTitle == "创作规则检索" })
+        for (title, originalID) in preservedPromptIDs {
+            let prompt = try XCTUnwrap(upgraded.nodes.first { $0.displayTitle == title })
+            XCTAssertEqual(prompt.id, originalID)
+            XCTAssertTrue(prompt.configuration.text.contains("{{rules}}"))
+            let hasRuleConnection = upgraded.connections.contains { connection in
+                connection.sourceNodeID == ruleSearch.id &&
+                connection.sourcePortID == "context" &&
+                connection.targetNodeID == prompt.id &&
+                connection.targetPortID == "rules"
+            }
+            XCTAssertTrue(hasRuleConnection)
+        }
+        XCTAssertTrue(WorkflowValidator.validate(upgraded, settings: SettingsStore()).isEmpty)
+    }
+
+    @MainActor
+    func testKnowledgeSearchQueryCompactionKeepsBeginningAndEnd() {
+        let query = "开头角色" + String(repeating: "中", count: 10_000) + "结尾产品"
+
+        let compacted = WorkflowExecutor.compactKnowledgeQuery(query, maxCharacters: 1_000)
+
+        XCTAssertLessThanOrEqual(compacted.count, 1_000)
+        XCTAssertTrue(compacted.hasPrefix("开头角色"))
+        XCTAssertTrue(compacted.hasSuffix("结尾产品"))
+        XCTAssertTrue(compacted.contains("已为知识检索压缩"))
+    }
+
+    @MainActor
+    func testKnowledgeRequirementParserRepairsMissingFirstObjectOpening() throws {
+        let malformed = #"{"requirements":[id":"CHAR-1","category":"character","name":"小悠","role":"副驾驶乘客","aliases":[],"searchTerms":["小悠 副驾驶"],"isGenericVehicleScene":false},{"id":"SCENE-1","category":"vehicleScene","name":"蔚来第三代ES8座舱","role":"主要场景","aliases":["蔚来第三代ES8"],"searchTerms":["蔚来 ES8 座舱"],"isGenericVehicleScene":false}]}"#
+
+        let parsed = try XCTUnwrap(WorkflowExecutor.parseKnowledgeRequirements(from: malformed))
+
+        XCTAssertEqual(parsed.requirements.map(\.id), ["CHAR-1", "SCENE-1"])
+        XCTAssertEqual(parsed.requirements.map(\.name), ["小悠", "蔚来第三代ES8座舱"])
+        XCTAssertEqual(parsed.requirements.map(\.category), [.character, .vehicleScene])
+    }
+
+    @MainActor
+    func testKnowledgeRequirementParserStillRejectsUnrelatedMalformedOutput() {
+        XCTAssertNil(WorkflowExecutor.parseKnowledgeRequirements(from: #"{"requirements":[name":"小悠"}]}"#))
+        XCTAssertNil(WorkflowExecutor.parseKnowledgeRequirements(from: #"{"requirements":[]}"#))
+    }
+
+    @MainActor
     func testBuiltInWorkflowRejectsEditsAndCreatesEditableCopy() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("HeiNiuBuiltInWorkflow-\(UUID().uuidString)", isDirectory: true)
@@ -561,6 +684,47 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testInterruptedKnowledgeChildFailsWithoutCancellingWaitingParent() throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = WorkflowStore(rootURL: root)
+        let parentWorkflow = WorkflowDefinition.vehicleInteriorAd()
+        var parent = WorkflowRun(
+            workflowID: parentWorkflow.id,
+            targetNodeID: nil,
+            runtimeInputs: [:],
+            nodes: parentWorkflow.nodes
+        )
+        parent.status = .waitingForKnowledge
+        parent.pendingKnowledgeGaps = [WorkflowKnowledgeGap(
+            requirement: WorkflowKnowledgeRequirement(id: "product-1", category: .product, name: "目标产品"),
+            message: "待补产品"
+        )]
+        store.saveRun(parent)
+
+        let childWorkflow = WorkflowDefinition.knowledgeImport()
+        let child = WorkflowRun(
+            workflowID: childWorkflow.id,
+            targetNodeID: nil,
+            runtimeInputs: [:],
+            nodes: childWorkflow.nodes,
+            parentRunID: parent.id,
+            knowledgeGapCategory: .product
+        )
+        store.saveRun(child)
+        store.appendChildRun(child.id, toParentWorkflowID: parent.workflowID, parentRunID: parent.id)
+
+        store.failInterruptedKnowledgeChildren(parentRunID: parent.id)
+
+        let failedChild = try XCTUnwrap(store.storedRun(workflowID: child.workflowID, runID: child.id))
+        let waitingParent = try XCTUnwrap(store.storedRun(workflowID: parent.workflowID, runID: parent.id))
+        XCTAssertEqual(failedChild.status, .failed)
+        XCTAssertTrue(failedChild.warnings.contains { $0.contains("未正常结束") })
+        XCTAssertEqual(waitingParent.status, .waitingForKnowledge)
+        XCTAssertEqual(waitingParent.childRunIDs, [child.id])
+    }
+
+    @MainActor
     func testLegacyKnowledgeImportAddsExplicitPromptInputAndKeepsConfiguration() throws {
         let root = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -693,6 +857,77 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(
             atPath: root.appendingPathComponent("project-board.json").path
         ))
+    }
+
+    @MainActor
+    func testKnowledgeReferenceManifestMapsToCardsAndStripsMetadata() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeiNiuProjectKnowledgeRefs-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let workflow = WorkflowDefinition.vehicleInteriorAd()
+        let knowledgeNode = try XCTUnwrap(workflow.nodes.first { $0.kind == .knowledgePreparation })
+        let outputNode = try XCTUnwrap(workflow.nodes.first { $0.kind == .output })
+        let manifest = WorkflowReferenceManifest(entries: [
+            WorkflowReferenceManifestEntry(
+                referenceID: "CHAR-01",
+                requirementID: "character-1",
+                category: .character,
+                documentID: UUID(),
+                title: "女主林夏",
+                relativePath: "Assets/KnowledgeReferences/CHAR-01.jpg",
+                score: 0.98
+            ),
+            WorkflowReferenceManifestEntry(
+                referenceID: "PROD-01",
+                requirementID: "product-1",
+                category: .product,
+                documentID: UUID(),
+                title: "目标香水",
+                relativePath: "Assets/KnowledgeReferences/PROD-01.png",
+                score: 0.96
+            ),
+        ])
+        let manifestText = String(decoding: try JSONEncoder().encode(manifest), as: UTF8.self)
+        let storyboard = """
+        ## 镜头 1
+        - 时长：4 秒
+        - 画面描述：林夏坐在副驾展示香水。
+        - 参考资料：CHAR-01, PROD-01
+
+        ## 镜头 2
+        - 时长：5 秒
+        - 画面描述：产品特写。
+        - 参考资料：BAD-ID
+        """
+        var run = WorkflowRun(
+            workflowID: workflow.id,
+            targetNodeID: nil,
+            runtimeInputs: [:],
+            nodes: workflow.nodes
+        )
+        run.nodeRuns[try XCTUnwrap(run.nodeRuns.firstIndex { $0.nodeID == knowledgeNode.id })].outputs = [
+            "referenceManifest": .text(manifestText),
+        ]
+        run.nodeRuns[try XCTUnwrap(run.nodeRuns.firstIndex { $0.nodeID == outputNode.id })].outputs = [
+            "value": .text(storyboard),
+        ]
+        run.status = .succeeded
+
+        let store = ProjectStore(rootURL: root)
+        let projectID = store.createProject(name: "知识参考图", workflow: workflow)
+        store.bindRun(projectID: projectID, runID: run.id)
+        XCTAssertTrue(store.synchronize(projectID: projectID, run: run, workflow: workflow))
+
+        let project = try XCTUnwrap(store.project(id: projectID))
+        XCTAssertEqual(project.storyboardShots.count, 2)
+        XCTAssertFalse(project.storyboardShots[0].prompt.contains("参考资料"))
+        XCTAssertEqual(project.storyboardShots[0].referenceImages.map(\.source), [.knowledge, .knowledge])
+        XCTAssertEqual(project.storyboardShots[0].referenceImages.map(\.relativePath), [
+            "Assets/KnowledgeReferences/CHAR-01.jpg",
+            "Assets/KnowledgeReferences/PROD-01.png",
+        ])
+        XCTAssertEqual(project.storyboardShots[1].referenceImages.count, 2)
+        XCTAssertTrue(project.runWarnings.contains { $0.contains("无效参考 ID") || $0.contains("兜底") })
     }
 
     @MainActor
@@ -973,6 +1208,93 @@ final class WorkflowExecutorTests: XCTestCase {
         XCTAssertEqual(failureStore.activeRun?.nodeRun(id: failingNodeID)?.status, .failed)
         XCTAssertEqual(failureStore.activeRun?.nodeRun(id: pendingOutputID)?.status, .skipped)
         XCTAssertFalse(failureStore.activeRun?.nodeRuns.contains { $0.status == .pending } == true)
+    }
+
+    @MainActor
+    func testKnowledgeGapPausesPersistsAndResumeReusesCompletedNodes() async throws {
+        let root = try temporaryDirectory()
+        let sourceRoot = try temporaryDirectory()
+        defer {
+            try? FileManager.default.removeItem(at: root)
+            try? FileManager.default.removeItem(at: sourceRoot)
+        }
+        let source = sourceRoot.appendingPathComponent("linxia.jpg")
+        try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: source)
+        let provider = LLMProvider(name: "测试嵌入", protocolType: .openAICompatible, models: ["embed-test"])
+        let settings = SettingsStore()
+        settings.providers = [provider]
+        settings.knowledgeEmbeddingProviderID = provider.id
+        settings.knowledgeEmbeddingModel = "embed-test"
+        settings.setAPIKey("workflow-test-key", for: provider.id)
+        defer { settings.setAPIKey("", for: provider.id) }
+
+        let requirements = #"{"requirements":[{"id":"character-1","category":"character","name":"林夏","role":"女主副驾","aliases":[],"searchTerms":["林夏 女主"],"isGenericVehicleScene":false}]}"#
+        var inputConfiguration = WorkflowNodeConfiguration()
+        inputConfiguration.text = requirements
+        let input = WorkflowNode(kind: .runtimeInput, position: .zero, configuration: inputConfiguration, createdAt: Date(timeIntervalSince1970: 1))
+        var preparationConfiguration = WorkflowNodeConfiguration()
+        preparationConfiguration.topK = 12
+        let preparation = WorkflowNode(kind: .knowledgePreparation, position: WorkflowPoint(x: 200, y: 0), configuration: preparationConfiguration, createdAt: Date(timeIntervalSince1970: 2))
+        let output = WorkflowNode(kind: .output, position: WorkflowPoint(x: 400, y: 0), createdAt: Date(timeIntervalSince1970: 3))
+        let workflow = WorkflowDefinition(
+            name: "知识暂停恢复",
+            nodes: [input, preparation, output],
+            connections: [
+                WorkflowConnection(sourceNodeID: input.id, sourcePortID: "text", targetNodeID: preparation.id, targetPortID: "requirements"),
+                WorkflowConnection(sourceNodeID: preparation.id, sourcePortID: "context", targetNodeID: output.id, targetPortID: "value"),
+            ]
+        )
+        let recorder = NodeExecutionRecorder()
+        let executor = WorkflowExecutor(executionHook: { node in recorder.nodeIDs.append(node.id) })
+        let knowledge = MutableKnowledgeSearch()
+        let store = WorkflowStore(rootURL: root)
+
+        let runID = try XCTUnwrap(executor.start(
+            workflow: workflow,
+            targetNodeID: nil,
+            runtimeInputs: [:],
+            settings: settings,
+            knowledge: knowledge,
+            store: store
+        ))
+        try await waitUntilFinished(executor)
+        let waiting = try XCTUnwrap(store.storedRun(workflowID: workflow.id, runID: runID))
+        XCTAssertEqual(waiting.status, .waitingForKnowledge)
+        XCTAssertEqual(waiting.pendingKnowledgeGaps.first?.requirement.name, "林夏")
+        XCTAssertEqual(waiting.nodeRun(id: preparation.id)?.status, .waiting)
+        let reloadedStore = WorkflowStore(rootURL: root)
+        let persistedWaiting = try XCTUnwrap(reloadedStore.storedRun(workflowID: workflow.id, runID: runID))
+        XCTAssertEqual(persistedWaiting.status, .waitingForKnowledge)
+        XCTAssertEqual(persistedWaiting.pendingKnowledgeGaps.first?.requirement.name, "林夏")
+
+        let documentID = UUID()
+        knowledge.results = [KnowledgeSearchResult(
+            chunkID: UUID(),
+            documentID: documentID,
+            documentTitle: "林夏人物锁定",
+            ordinal: 0,
+            text: "林夏，女主，副驾",
+            score: 0.99
+        )]
+        knowledge.evidence[documentID] = WorkflowKnowledgeDocumentEvidence(
+            documentID: documentID,
+            title: "林夏人物锁定",
+            tags: ["林夏", "人物"],
+            content: "林夏是广告女主，固定坐在副驾驶。",
+            originalFileURL: source
+        )
+        XCTAssertTrue(executor.resume(workflow: workflow, run: waiting, settings: settings, knowledge: knowledge, store: store))
+        try await waitUntilFinished(executor)
+
+        let completed = try XCTUnwrap(store.activeRun)
+        XCTAssertEqual(completed.status, .succeeded)
+        XCTAssertTrue(completed.pendingKnowledgeGaps.isEmpty)
+        XCTAssertEqual(recorder.nodeIDs.filter { $0 == input.id }.count, 1)
+        XCTAssertEqual(recorder.nodeIDs.filter { $0 == preparation.id }.count, 2)
+        let manifestText = try XCTUnwrap(completed.nodeRun(id: preparation.id)?.outputs["referenceManifest"]?.payload)
+        XCTAssertTrue(manifestText.contains("CHAR-01"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: store.runRoot(workflowID: workflow.id, runID: runID)
+            .appendingPathComponent("Assets/KnowledgeReferences/CHAR-01-\(documentID.uuidString.prefix(8)).jpg").path))
     }
 
     @MainActor
@@ -1561,6 +1883,26 @@ private final class StubKnowledgeSearch: WorkflowKnowledgeAccessing {
         limit: Int
     ) async throws -> [KnowledgeSearchResult] {
         []
+    }
+}
+
+@MainActor
+private final class MutableKnowledgeSearch: WorkflowKnowledgeAccessing {
+    var results: [KnowledgeSearchResult] = []
+    var evidence: [UUID: WorkflowKnowledgeDocumentEvidence] = [:]
+
+    func search(
+        query: String,
+        settings: SettingsStore,
+        collectionID: UUID?,
+        tags: [String],
+        limit: Int
+    ) async throws -> [KnowledgeSearchResult] {
+        Array(results.prefix(limit))
+    }
+
+    func documentEvidence(id: UUID) -> WorkflowKnowledgeDocumentEvidence? {
+        evidence[id]
     }
 }
 

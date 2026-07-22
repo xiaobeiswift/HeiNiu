@@ -5,6 +5,7 @@ import Foundation
 /// 项目从创建到分镜审核的生命周期状态。
 enum ProjectStatus: String, Codable, CaseIterable, Hashable, Sendable {
     case running
+    case awaitingKnowledge
     case awaitingReview
     case approved
     case failed
@@ -14,6 +15,7 @@ enum ProjectStatus: String, Codable, CaseIterable, Hashable, Sendable {
     var title: String {
         switch self {
         case .running: "运行中"
+        case .awaitingKnowledge: "待补资料"
         case .awaitingReview: "待审核"
         case .approved: "已通过"
         case .failed: "运行失败"
@@ -55,6 +57,7 @@ enum ProjectMediaStatus: String, Codable, Hashable, Sendable {
 /// 参考图片进入镜头的来源。
 enum ProjectReferenceImageSource: String, Codable, Hashable, Sendable {
     case workflow
+    case knowledge
     case imported
     case generated
 

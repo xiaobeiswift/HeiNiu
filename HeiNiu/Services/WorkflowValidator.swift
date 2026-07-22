@@ -87,7 +87,7 @@ enum WorkflowValidator {
                 if resolvedTemplate(for: node, settings: settings).usedSnapshot {
                     issues.append(warning("“\(node.displayTitle)”绑定的提示词已删除，将使用保存快照", node.id))
                 }
-            case .knowledgeSearch:
+            case .knowledgeSearch, .knowledgePreparation:
                 if settings.knowledgeEmbeddingProviderID == nil || settings.knowledgeEmbeddingModel.isEmpty {
                     issues.append(error("知识检索节点需要先配置嵌入服务商和模型", node.id))
                 }

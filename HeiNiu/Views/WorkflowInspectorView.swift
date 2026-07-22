@@ -270,6 +270,14 @@ private struct WorkflowNodeConfigurationView: View {
                     .foregroundStyle(AppTheme.textTertiary)
             }
 
+        case .knowledgePreparation:
+            inspectorSection("严格知识核验") {
+                Stepper("每项检索最多 \(draft.configuration.topK) 个候选", value: $draft.configuration.topK, in: 1...12)
+                Text("逐个核验明确人物、产品和车型/座舱身份。没有准确匹配且带原图的资料时，父运行会暂停等待补库。")
+                    .font(.caption)
+                    .foregroundStyle(AppTheme.textTertiary)
+            }
+
         case .knowledgeImport:
             inspectorSection("模型补充要求") {
                 labeledEditor("补充系统要求（可选）", text: $draft.configuration.systemPrompt, minHeight: 80)
@@ -1051,6 +1059,7 @@ private extension WorkflowRunStatus {
     var color: Color {
         switch self {
         case .running: AppTheme.accent
+        case .waitingForKnowledge: .orange
         case .succeeded: AppTheme.success
         case .warning: .orange
         case .failed: AppTheme.danger

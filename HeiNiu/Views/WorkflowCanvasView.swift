@@ -624,6 +624,7 @@ extension WorkflowNodeRunStatus {
     var color: Color {
         switch self {
         case .pending, .skipped: AppTheme.textTertiary
+        case .waiting: .orange
         case .running: AppTheme.accent
         case .succeeded: AppTheme.success
         case .warning: .orange

@@ -87,13 +87,22 @@ final class ProjectStore {
         case .running:
             projects[index].status = .running
             projects[index].lastError = nil
+        case .waitingForKnowledge:
+            projects[index].status = .awaitingKnowledge
+            projects[index].lastError = run.pendingKnowledgeGaps
+                .map { "\($0.requirement.category.title)：\($0.requirement.name)" }
+                .joined(separator: "；")
         case .succeeded, .warning:
             if ![.awaitingReview, .approved].contains(previousStatus) {
                 projects[index].storyboardDraft = Self.storyboardText(from: run, workflow: workflow)
-                projects[index].storyboardShots = Self.storyboardShots(
+                let parsed = Self.storyboardShots(
                     from: projects[index].storyboardDraft,
                     run: run
                 )
+                projects[index].storyboardShots = parsed.shots
+                for warning in parsed.warnings where !projects[index].runWarnings.contains(warning) {
+                    projects[index].runWarnings.append(warning)
+                }
                 projects[index].status = .awaitingReview
                 projects[index].lastError = nil
             }
@@ -393,7 +402,10 @@ final class ProjectStore {
         if blocks.isEmpty { blocks = [lines] }
 
         return blocks.enumerated().map { offset, block in
-            let prompt = block.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let prompt = block
+                .filter { !isReferenceMetadataLine($0) }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             return ProjectStoryboardShot(
                 order: offset + 1,
                 title: shotTitle(from: block, order: offset + 1),
@@ -496,9 +508,45 @@ final class ProjectStore {
         return "工作流运行失败"
     }
 
-    private static func storyboardShots(from storyboard: String, run: WorkflowRun) -> [ProjectStoryboardShot] {
+    private static func storyboardShots(
+        from storyboard: String,
+        run: WorkflowRun
+    ) -> (shots: [ProjectStoryboardShot], warnings: [String]) {
         var shots = storyboardShots(from: storyboard)
-        guard !shots.isEmpty else { return [] }
+        guard !shots.isEmpty else { return ([], []) }
+        var mappingWarnings: [String] = []
+
+        let manifest = referenceManifest(from: run)
+        if !manifest.entries.isEmpty {
+            let requestedIDs = referenceIDsByShot(from: storyboard)
+            var entriesByID: [String: WorkflowReferenceManifestEntry] = [:]
+            for entry in manifest.entries where entriesByID[entry.referenceID.uppercased()] == nil {
+                entriesByID[entry.referenceID.uppercased()] = entry
+            }
+            for index in shots.indices {
+                let requested = index < requestedIDs.count ? requestedIDs[index] : []
+                let valid = requested.compactMap { entriesByID[$0.uppercased()] }
+                let selected: [WorkflowReferenceManifestEntry]
+                if requested.isEmpty || valid.count != requested.count {
+                    selected = Array(manifest.entries.prefix(9))
+                    mappingWarnings.append("镜头 \(index + 1) 未声明完整有效参考资料，已使用本次有效参考包兜底")
+                } else {
+                    selected = Array(valid.prefix(9))
+                }
+                shots[index].referenceImages = selected.map { entry in
+                    ProjectReferenceImage(
+                        name: entry.title,
+                        relativePath: entry.relativePath,
+                        source: .knowledge
+                    )
+                }
+                if !shots[index].referenceImages.isEmpty {
+                    shots[index].referenceGenerationStatus = .succeeded
+                    shots[index].referenceGenerationProgress = 1
+                    shots[index].referenceGenerationMessage = "来自知识库参考包"
+                }
+            }
+        }
 
         let images = mediaPaths(from: run, type: .image)
         for (index, path) in images.enumerated() {
@@ -519,7 +567,52 @@ final class ProjectStore {
             shots[shotIndex].videoProgress = 1
             shots[shotIndex].videoMessage = "来自工作流运行"
         }
-        return shots
+        return (shots, Array(Set(mappingWarnings)).sorted())
+    }
+
+    private static func referenceManifest(from run: WorkflowRun) -> WorkflowReferenceManifest {
+        for nodeRun in run.nodeRuns.reversed() {
+            guard case .text(let text) = nodeRun.outputs["referenceManifest"],
+                  let data = text.data(using: .utf8),
+                  let manifest = try? JSONDecoder().decode(WorkflowReferenceManifest.self, from: data)
+            else { continue }
+            return manifest
+        }
+        return WorkflowReferenceManifest(entries: [])
+    }
+
+    private static func referenceIDsByShot(from storyboard: String) -> [[String]] {
+        let lines = storyboard.components(separatedBy: .newlines)
+        var result: [[String]] = []
+        var current: [String] = []
+        var foundShot = false
+        for line in lines {
+            if isShotStart(line) {
+                if foundShot { result.append(referenceIDs(in: current)) }
+                current = []
+                foundShot = true
+            }
+            current.append(line)
+        }
+        if !current.isEmpty { result.append(referenceIDs(in: current)) }
+        return result
+    }
+
+    private static func referenceIDs(in lines: [String]) -> [String] {
+        guard let line = lines.first(where: isReferenceMetadataLine),
+              let separator = line.firstIndex(where: { $0 == "：" || $0 == ":" })
+        else { return [] }
+        return line[line.index(after: separator)...]
+            .split(whereSeparator: { ",，、;； \t".contains($0) })
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func isReferenceMetadataLine(_ line: String) -> Bool {
+        let clean = line
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"^[#\-*•\s]+"#, with: "", options: .regularExpression)
+        return clean.hasPrefix("参考资料：") || clean.hasPrefix("参考资料:")
     }
 
     private static func mediaPaths(from run: WorkflowRun, type: WorkflowValueType) -> [String] {

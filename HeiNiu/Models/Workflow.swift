@@ -10,6 +10,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
     case runtimeInput
     case promptTemplate
     case knowledgeSearch
+    case knowledgePreparation
     case knowledgeImport
     case llm
     case imageGeneration
@@ -21,7 +22,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
 
     /// 节点目录中的稳定顺序。
     static let catalog: [WorkflowNodeKind] = [
-        .runtimeInput, .promptTemplate, .knowledgeSearch, .knowledgeImport, .llm,
+        .runtimeInput, .promptTemplate, .knowledgeSearch, .knowledgePreparation, .knowledgeImport, .llm,
         .imageGeneration, .videoGeneration, .condition, .loop, .output,
     ]
 
@@ -31,6 +32,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
         case .runtimeInput: "runtimeInput"
         case .promptTemplate: "promptTemplate"
         case .knowledgeSearch: "knowledgeSearch"
+        case .knowledgePreparation: "knowledgePreparation"
         case .knowledgeImport: "knowledgeImport"
         case .llm: "llm"
         case .imageGeneration: "imageGeneration"
@@ -48,6 +50,7 @@ enum WorkflowNodeKind: Hashable, Codable, Identifiable {
         case "runtimeInput": self = .runtimeInput
         case "promptTemplate": self = .promptTemplate
         case "knowledgeSearch": self = .knowledgeSearch
+        case "knowledgePreparation": self = .knowledgePreparation
         case "knowledgeImport": self = .knowledgeImport
         case "llm": self = .llm
         case "imageGeneration": self = .imageGeneration
@@ -148,6 +151,12 @@ struct WorkflowNodeDescriptor: Identifiable, Hashable {
             return [
                 Self.input("query", "查询", .text, true, "用于向量检索的查询文本。"),
                 Self.output("context", "检索结果", .text, "按相似度整理的资料片段与来源。"),
+            ]
+        case .knowledgePreparation:
+            return [
+                Self.input("requirements", "创作要素", .text, true, "要素提取模型输出的严格 JSON。"),
+                Self.output("context", "证据文字", .text, "按明确身份核验后的知识证据；仅文字进入规划模型。"),
+                Self.output("referenceManifest", "参考图清单", .text, "复制到本次运行目录的知识原图与稳定引用 ID。"),
             ]
         case .knowledgeImport:
             return [
@@ -368,6 +377,21 @@ enum WorkflowNodeCatalog {
                     resultDescription: "每张成功图片成为一条知识资料并保留原图；若已配置嵌入服务则自动建立向量索引，最后输出批处理摘要。",
                     commonErrors: ["所选服务商未开启视觉能力。", "文件夹内没有支持的图片。", "模型、API Key 或网络不可用。", "模型返回内容为空。"],
                     warnings: ["每张图片会产生一次视觉模型请求；请用单次上限控制费用。", "同一图片和生成内容重复运行时会跳过重复资料。"]
+                )
+            ),
+            WorkflowNodeDescriptor(
+                kind: .knowledgePreparation,
+                title: "创作知识准备",
+                summary: "逐项核验人物、产品与车内场景资料",
+                systemImage: "books.vertical.circle",
+                tint: .green,
+                usage: NodeUsageGuide(
+                    purpose: "读取要素提取 JSON，逐个检索全局知识库并严格核验明确身份；资料不足时暂停父运行，等待补库后从这里恢复。",
+                    setupSteps: ["连接要素提取模型的严格 JSON 输出。", "设置每项候选上限。", "确保知识资料已建立索引并保留原始图片。"],
+                    connectionExample: "LLM 要素提取 → 创作知识准备 → 规划提示词",
+                    resultDescription: "输出文字证据与稳定参考图清单；原图只复制到运行目录，不发送给规划模型。",
+                    commonErrors: ["JSON 格式不符合要素协议。", "明确人物、产品或车型没有准确匹配资料。"],
+                    warnings: ["检索会调用嵌入接口；资料缺失时父运行会进入待补资料状态。", "纯文字资料可以参与规划，但没有原图可挂到分镜卡片。"]
                 )
             ),
             WorkflowNodeDescriptor(
@@ -856,6 +880,182 @@ struct WorkflowDefinition: Identifiable, Codable, Hashable {
             ]
         )
     }
+
+    /// 内置“汽车内广告分镜”工作流的稳定 ID。
+    static let vehicleInteriorAdWorkflowID = UUID(uuidString: "ADD0A11B-0000-4B00-8000-000000000002")!
+
+    /// 用文章语义召回适用的全局创作规则；这不是某一人物或某一种表格的专用查询。
+    static let vehicleInteriorAdRuleQueryTemplate = """
+    检索与下面汽车广告文章有关的全局创作规则、强制约束、优先级、身份覆盖、固定选角、产品边界、车型场景和连续性规则。优先召回明确标注“规则”“强制”“优先级”“覆盖”“禁止”的资料。
+
+    文章：
+    {{article}}
+    """
+
+    /// 要素模型先理解知识库规则，再决定真正需要核验的视觉身份和产品场景身份。
+    static let vehicleInteriorAdExtractionPromptTemplate = """
+    从下面文章逐项提取制作汽车内广告分镜必须锁定的资料。只输出 JSON，不要 Markdown 或解释。
+    JSON 结构必须是：
+    {"requirements":[{"id":"CHAR-1","category":"character","name":"规则解析后的真实视觉身份","role":"原文称呼、剧情角色、座位身份和规则映射说明","aliases":["该视觉身份的真实别名或规则指定参考文件名"],"searchTerms":["精确检索词"],"isGenericVehicleScene":false}]}
+    requirements 必须是 JSON 对象数组，每一项都必须完整写成 {"id":...}，不能省略花括号或键名开头的双引号。
+
+    规则处理原则：
+    1. “知识库候选规则”只是召回片段。只有正文明确声明自己是规则、强制约束、具有优先级或覆盖关系时，才允许覆盖文章；普通人物介绍、产品说明和相似案例不能覆盖文章。
+    2. 先按规则的适用范围、优先级和角色条件完成身份解析，再输出 requirements。规则可以约束人物、产品、车型、座舱、参考文件、禁止事项和连续性，不限于固定选角。
+    3. 规则若规定“文案姓名仅作称呼、视觉身份按角色固定”，name 必须填写规则指定的视觉身份；role 保留原文称呼并写明映射；aliases 只放该视觉身份的真实别名和规则指定的参考文件名，不把被覆盖的文案称呼伪装成身份别名。
+    4. 多条规则冲突时只执行正文明确给出的优先级；无法判定优先级时，不擅自合并或替代，保留文章明确身份以触发人工补资料。
+    5. 没有适用强制规则时，保持文章身份，不用相似对象替代。
+
+    category 只能是 character、product、vehicleScene。每个规则解析后的明确人物、目标产品/型号、指定车型/座舱都必须单独一项。车型未指定时仍添加一项 name=通用汽车座舱、category=vehicleScene、isGenericVehicleScene=true。目标产品未指定时添加 name=文章未明确目标产品 的 product 项，使流程请求用户补充。按文章首次出现顺序输出。
+
+    知识库候选规则：
+    {{rules}}
+
+    文章：
+    {{article}}
+    """
+
+    /// 规划模型同时看到适用规则候选，确保身份锁和产品边界贯穿全片。
+    static let vehicleInteriorAdPlanningPromptTemplate = """
+    你是汽车内短视频广告总导演。先规划观众从开头到结尾的完整观看体验，再写可供审校的分镜草案。
+
+    硬性规则：
+    1. 先明确观看承诺、连续好奇链、情绪曲线、戏剧分组与产品证明边界，再决定镜头数量；不要从逐句拆镜开始。
+    2. 第一个剧情事件必须在 0.5 秒内开始；审核 0–3 秒与 0–5 秒留存。正常戏剧组不少于 4 秒，时长由文章内容决定，不为凑模型最小时长添加空镜。
+    3. 每组都要推进故事或兑现产品证据；删除任何不改变理解、情绪或证据的无效镜头。
+    4. 不添加原文没有的事实、台词、效果或产品能力。清楚记录人物座位、朝向、车门方向、手持物、上下车状态与跨镜连续性。
+    5. 只执行候选规则中明确声明为规则、强制约束、优先级或覆盖关系且适用于本文的内容；普通召回资料不是规则。规则指定的视觉人物身份优先于文案称呼，但台词和剧情称呼仍保留原文。
+    6. 只把已核验证据文字作为知识事实。参考图清单只用于给最终镜头声明引用，不把图片当作你看过的多模态输入。
+
+    原文：
+    {{article}}
+
+    知识库候选规则：
+    {{rules}}
+
+    已核验知识证据：
+    {{context}}
+
+    可用参考图清单：
+    {{references}}
+    """
+
+    /// 审校模型再次校验规则适用范围，避免规划阶段遗漏或误用普通知识资料。
+    static let vehicleInteriorAdReviewPromptTemplate = """
+    你是最终分镜审校导演。对草案逐项检查并完整重写：原文事实与台词、适用的强制规则、规则优先级与覆盖范围、视觉身份锁、产品证据边界、人物座位、镜头轴线、车门方向、手持物、进出车连续性、0–3/0–5 秒留存、无效镜头、产品露出是否过早或无证据。普通召回资料不能冒充强制规则；任何不合格处直接修正，不写审校报告。
+
+    最终只输出当前卡片解析器兼容的 Markdown 分镜。每个镜头必须以“## 镜头 N”开始，并包含：
+    - 时长：N 秒
+    - 戏剧任务：本镜如何推进观看体验
+    - 画面描述：文案称呼、实际视觉人物身份、座位、动作、车门/朝向、产品与场景
+    - 镜头与运动：景别、机位、运动、构图、光线
+    - 台词/声音：严格保留原文或明确写无
+    - 连续性：与前后镜头可拼接的状态
+    - 参考资料：CHAR-01, PROD-01, SCENE-01（只能选清单里的有效 ID，最多 9 个）
+    不要输出 JSON、总评、代码围栏或额外前言。
+
+    原文：
+    {{article}}
+
+    知识库候选规则：
+    {{rules}}
+
+    知识证据：
+    {{context}}
+
+    有效参考图清单：
+    {{references}}
+
+    规划草案：
+    {{draft}}
+    """
+
+    /// 创建受众体验优先、带严格知识核验的汽车内广告分镜工作流。
+    static func vehicleInteriorAd() -> WorkflowDefinition {
+        var articleConfiguration = WorkflowNodeConfiguration()
+        articleConfiguration.parameterName = "广告文章"
+        articleConfiguration.runtimeInputType = .text
+        articleConfiguration.text = ""
+
+        var ruleQueryConfiguration = WorkflowNodeConfiguration()
+        ruleQueryConfiguration.title = "创作规则检索提示"
+        ruleQueryConfiguration.text = vehicleInteriorAdRuleQueryTemplate
+
+        var ruleSearchConfiguration = WorkflowNodeConfiguration()
+        ruleSearchConfiguration.title = "创作规则检索"
+        ruleSearchConfiguration.topK = 12
+
+        var extractionPromptConfiguration = WorkflowNodeConfiguration()
+        extractionPromptConfiguration.title = "要素提取提示"
+        extractionPromptConfiguration.text = vehicleInteriorAdExtractionPromptTemplate
+
+        var extractionConfiguration = WorkflowNodeConfiguration()
+        extractionConfiguration.title = "LLM 要素提取"
+        extractionConfiguration.temperature = 0.1
+        extractionConfiguration.reasoningEffort = .low
+
+        var knowledgeConfiguration = WorkflowNodeConfiguration()
+        knowledgeConfiguration.title = "创作知识准备"
+        knowledgeConfiguration.topK = 12
+
+        var planningPromptConfiguration = WorkflowNodeConfiguration()
+        planningPromptConfiguration.title = "全片规划提示"
+        planningPromptConfiguration.text = vehicleInteriorAdPlanningPromptTemplate
+
+        var planningConfiguration = WorkflowNodeConfiguration()
+        planningConfiguration.title = "中等推理规划"
+        planningConfiguration.temperature = 0.3
+        planningConfiguration.reasoningEffort = .medium
+
+        var reviewPromptConfiguration = WorkflowNodeConfiguration()
+        reviewPromptConfiguration.title = "高推理审校提示"
+        reviewPromptConfiguration.text = vehicleInteriorAdReviewPromptTemplate
+
+        var reviewConfiguration = WorkflowNodeConfiguration()
+        reviewConfiguration.title = "高推理审校重写"
+        reviewConfiguration.temperature = 0.2
+        reviewConfiguration.reasoningEffort = .high
+
+        let article = WorkflowNode(kind: .runtimeInput, position: WorkflowPoint(x: 40, y: 260), configuration: articleConfiguration)
+        let ruleQuery = WorkflowNode(kind: .promptTemplate, position: WorkflowPoint(x: 330, y: 40), configuration: ruleQueryConfiguration)
+        let ruleSearch = WorkflowNode(kind: .knowledgeSearch, position: WorkflowPoint(x: 650, y: 40), configuration: ruleSearchConfiguration)
+        let extractionPrompt = WorkflowNode(kind: .promptTemplate, position: WorkflowPoint(x: 950, y: 100), configuration: extractionPromptConfiguration)
+        let extraction = WorkflowNode(kind: .llm, position: WorkflowPoint(x: 1260, y: 100), configuration: extractionConfiguration)
+        let knowledge = WorkflowNode(kind: .knowledgePreparation, position: WorkflowPoint(x: 1570, y: 100), configuration: knowledgeConfiguration)
+        let planningPrompt = WorkflowNode(kind: .promptTemplate, position: WorkflowPoint(x: 1880, y: 190), configuration: planningPromptConfiguration)
+        let planning = WorkflowNode(kind: .llm, position: WorkflowPoint(x: 2210, y: 190), configuration: planningConfiguration)
+        let reviewPrompt = WorkflowNode(kind: .promptTemplate, position: WorkflowPoint(x: 2520, y: 250), configuration: reviewPromptConfiguration)
+        let review = WorkflowNode(kind: .llm, position: WorkflowPoint(x: 2850, y: 250), configuration: reviewConfiguration)
+        let output = WorkflowNode(kind: .output, position: WorkflowPoint(x: 3160, y: 250))
+
+        return WorkflowDefinition(
+            id: vehicleInteriorAdWorkflowID,
+            name: "汽车内广告分镜",
+            isBuiltIn: true,
+            nodes: [article, ruleQuery, ruleSearch, extractionPrompt, extraction, knowledge, planningPrompt, planning, reviewPrompt, review, output],
+            connections: [
+                WorkflowConnection(sourceNodeID: article.id, sourcePortID: "text", targetNodeID: ruleQuery.id, targetPortID: "article"),
+                WorkflowConnection(sourceNodeID: ruleQuery.id, sourcePortID: "text", targetNodeID: ruleSearch.id, targetPortID: "query"),
+                WorkflowConnection(sourceNodeID: article.id, sourcePortID: "text", targetNodeID: extractionPrompt.id, targetPortID: "article"),
+                WorkflowConnection(sourceNodeID: ruleSearch.id, sourcePortID: "context", targetNodeID: extractionPrompt.id, targetPortID: "rules"),
+                WorkflowConnection(sourceNodeID: extractionPrompt.id, sourcePortID: "text", targetNodeID: extraction.id, targetPortID: "prompt"),
+                WorkflowConnection(sourceNodeID: extraction.id, sourcePortID: "text", targetNodeID: knowledge.id, targetPortID: "requirements"),
+                WorkflowConnection(sourceNodeID: article.id, sourcePortID: "text", targetNodeID: planningPrompt.id, targetPortID: "article"),
+                WorkflowConnection(sourceNodeID: ruleSearch.id, sourcePortID: "context", targetNodeID: planningPrompt.id, targetPortID: "rules"),
+                WorkflowConnection(sourceNodeID: knowledge.id, sourcePortID: "context", targetNodeID: planningPrompt.id, targetPortID: "context"),
+                WorkflowConnection(sourceNodeID: knowledge.id, sourcePortID: "referenceManifest", targetNodeID: planningPrompt.id, targetPortID: "references"),
+                WorkflowConnection(sourceNodeID: planningPrompt.id, sourcePortID: "text", targetNodeID: planning.id, targetPortID: "prompt"),
+                WorkflowConnection(sourceNodeID: article.id, sourcePortID: "text", targetNodeID: reviewPrompt.id, targetPortID: "article"),
+                WorkflowConnection(sourceNodeID: ruleSearch.id, sourcePortID: "context", targetNodeID: reviewPrompt.id, targetPortID: "rules"),
+                WorkflowConnection(sourceNodeID: knowledge.id, sourcePortID: "context", targetNodeID: reviewPrompt.id, targetPortID: "context"),
+                WorkflowConnection(sourceNodeID: knowledge.id, sourcePortID: "referenceManifest", targetNodeID: reviewPrompt.id, targetPortID: "references"),
+                WorkflowConnection(sourceNodeID: planning.id, sourcePortID: "text", targetNodeID: reviewPrompt.id, targetPortID: "draft"),
+                WorkflowConnection(sourceNodeID: reviewPrompt.id, sourcePortID: "text", targetNodeID: review.id, targetPortID: "prompt"),
+                WorkflowConnection(sourceNodeID: review.id, sourcePortID: "text", targetNodeID: output.id, targetPortID: "value"),
+            ],
+            viewport: WorkflowViewport(offset: WorkflowPoint(x: 20, y: 40), zoom: 0.64)
+        )
+    }
 }
 
 /// 节点端口在一次运行中传递的值。
@@ -909,12 +1109,13 @@ enum WorkflowValue: Codable, Hashable, Sendable {
 
 /// 单节点运行状态。
 enum WorkflowNodeRunStatus: String, Codable, Hashable, Sendable {
-    case pending, running, succeeded, skipped, warning, failed, cancelled
+    case pending, running, waiting, succeeded, skipped, warning, failed, cancelled
 
     var title: String {
         switch self {
         case .pending: "等待"
         case .running: "运行中"
+        case .waiting: "待补资料"
         case .succeeded: "完成"
         case .skipped: "跳过"
         case .warning: "完成（有警告）"
@@ -931,11 +1132,12 @@ enum WorkflowNodeRunStatus: String, Codable, Hashable, Sendable {
 
 /// 整次工作流运行状态。
 enum WorkflowRunStatus: String, Codable, Hashable, Sendable {
-    case running, succeeded, warning, failed, cancelled
+    case running, waitingForKnowledge, succeeded, warning, failed, cancelled
 
     var title: String {
         switch self {
         case .running: "运行中"
+        case .waitingForKnowledge: "待补资料"
         case .succeeded: "已完成"
         case .warning: "已完成（有警告）"
         case .failed: "失败"
@@ -947,6 +1149,129 @@ enum WorkflowRunStatus: String, Codable, Hashable, Sendable {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = Self(rawValue: raw) ?? .failed
     }
+}
+
+/// 创作知识需求的稳定类别，也决定自动补库顺序。
+enum WorkflowKnowledgeCategory: String, Codable, CaseIterable, Hashable, Sendable {
+    case character
+    case product
+    case vehicleScene
+
+    /// 中文类别名。
+    var title: String {
+        switch self {
+        case .character: "人物"
+        case .product: "产品"
+        case .vehicleScene: "车内场景"
+        }
+    }
+
+    /// 自动补库时使用的内置提示词名。
+    var knowledgeImportPromptName: String {
+        switch self {
+        case .character: DefaultPrompts.characterKnowledgeImportPromptName
+        case .product: DefaultPrompts.productKnowledgeImportPromptName
+        case .vehicleScene: DefaultPrompts.vehicleKnowledgeImportPromptName
+        }
+    }
+}
+
+/// 要素提取模型输出的一项明确知识需求。
+struct WorkflowKnowledgeRequirement: Codable, Hashable, Sendable {
+    var id: String
+    var category: WorkflowKnowledgeCategory
+    var name: String
+    var role: String
+    var aliases: [String]
+    var searchTerms: [String]
+    var isGenericVehicleScene: Bool
+
+    init(
+        id: String,
+        category: WorkflowKnowledgeCategory,
+        name: String,
+        role: String = "",
+        aliases: [String] = [],
+        searchTerms: [String] = [],
+        isGenericVehicleScene: Bool = false
+    ) {
+        self.id = id
+        self.category = category
+        self.name = name
+        self.role = role
+        self.aliases = aliases
+        self.searchTerms = searchTerms
+        self.isGenericVehicleScene = isGenericVehicleScene
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        category = (try? container.decodeIfPresent(WorkflowKnowledgeCategory.self, forKey: .category)) ?? .product
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        role = try container.decodeIfPresent(String.self, forKey: .role) ?? ""
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+        searchTerms = try container.decodeIfPresent([String].self, forKey: .searchTerms) ?? []
+        isGenericVehicleScene = try container.decodeIfPresent(Bool.self, forKey: .isGenericVehicleScene) ?? false
+    }
+}
+
+/// 要素提取节点的严格 JSON 包装。
+struct WorkflowKnowledgeRequirements: Codable, Hashable, Sendable {
+    var requirements: [WorkflowKnowledgeRequirement]
+
+    init(requirements: [WorkflowKnowledgeRequirement]) {
+        self.requirements = requirements
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requirements = try container.decodeIfPresent([WorkflowKnowledgeRequirement].self, forKey: .requirements) ?? []
+    }
+}
+
+/// 父运行持久化的一项待补资料。
+struct WorkflowKnowledgeGap: Identifiable, Codable, Hashable, Sendable {
+    var id: String { requirement.id }
+    var requirement: WorkflowKnowledgeRequirement
+    var message: String
+
+    init(requirement: WorkflowKnowledgeRequirement, message: String) {
+        self.requirement = requirement
+        self.message = message
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        requirement = try container.decodeIfPresent(WorkflowKnowledgeRequirement.self, forKey: .requirement)
+            ?? WorkflowKnowledgeRequirement(id: UUID().uuidString, category: .product, name: "未知产品")
+        message = try container.decodeIfPresent(String.self, forKey: .message) ?? "资料未命中"
+    }
+}
+
+/// 一张复制到运行目录中的知识参考图。
+struct WorkflowReferenceManifestEntry: Codable, Hashable, Sendable {
+    var referenceID: String
+    var requirementID: String
+    var category: WorkflowKnowledgeCategory
+    var documentID: UUID
+    var title: String
+    var relativePath: String
+    var score: Double
+}
+
+/// 知识准备节点输出的稳定参考图清单。
+struct WorkflowReferenceManifest: Codable, Hashable, Sendable {
+    var entries: [WorkflowReferenceManifestEntry]
+}
+
+/// 知识准备节点核验标题、标签、正文与原文件所需的只读快照。
+struct WorkflowKnowledgeDocumentEvidence: Hashable, Sendable {
+    var documentID: UUID
+    var title: String
+    var tags: [String]
+    var content: String
+    var originalFileURL: URL?
 }
 
 /// 一次运行中的单节点记录。
@@ -990,17 +1315,27 @@ struct WorkflowRun: Identifiable, Codable, Hashable, Sendable {
     var runtimeInputs: [String: WorkflowValue]
     var nodeRuns: [WorkflowNodeRun]
     var warnings: [String]
+    /// 父创作运行当前仍缺少的资料。
+    var pendingKnowledgeGaps: [WorkflowKnowledgeGap]
+    /// 补库子运行指向的父运行。
+    var parentRunID: UUID?
+    /// 父运行已启动过的补库子运行。
+    var childRunIDs: [UUID]
+    /// 补库子运行正在处理的资料类别。
+    var knowledgeGapCategory: WorkflowKnowledgeCategory?
     var startedAt: Date
     var endedAt: Date?
 
-    static let currentFormatVersion = 3
+    static let currentFormatVersion = 4
 
     init(
         id: UUID = UUID(),
         workflowID: UUID,
         targetNodeID: UUID?,
         runtimeInputs: [String: WorkflowValue],
-        nodes: [WorkflowNode]
+        nodes: [WorkflowNode],
+        parentRunID: UUID? = nil,
+        knowledgeGapCategory: WorkflowKnowledgeCategory? = nil
     ) {
         formatVersion = Self.currentFormatVersion
         self.id = id
@@ -1010,6 +1345,10 @@ struct WorkflowRun: Identifiable, Codable, Hashable, Sendable {
         self.runtimeInputs = runtimeInputs
         nodeRuns = nodes.map { WorkflowNodeRun(nodeID: $0.id) }
         warnings = []
+        pendingKnowledgeGaps = []
+        self.parentRunID = parentRunID
+        childRunIDs = []
+        self.knowledgeGapCategory = knowledgeGapCategory
         startedAt = Date()
     }
 
@@ -1029,6 +1368,10 @@ struct WorkflowRun: Identifiable, Codable, Hashable, Sendable {
         }
         nodeRuns = try container.decodeIfPresent([WorkflowNodeRun].self, forKey: .nodeRuns) ?? []
         warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        pendingKnowledgeGaps = try container.decodeIfPresent([WorkflowKnowledgeGap].self, forKey: .pendingKnowledgeGaps) ?? []
+        parentRunID = try container.decodeIfPresent(UUID.self, forKey: .parentRunID)
+        childRunIDs = try container.decodeIfPresent([UUID].self, forKey: .childRunIDs) ?? []
+        knowledgeGapCategory = try? container.decodeIfPresent(WorkflowKnowledgeCategory.self, forKey: .knowledgeGapCategory)
         startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt) ?? Date()
         endedAt = try container.decodeIfPresent(Date.self, forKey: .endedAt)
     }

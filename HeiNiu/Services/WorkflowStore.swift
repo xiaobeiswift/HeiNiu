@@ -187,6 +187,8 @@ final class WorkflowStore {
         case .knowledgeImport:
             configuration.temperature = 0.2
             configuration.maxFiles = 50
+        case .knowledgePreparation:
+            configuration.topK = 12
         case .imageGeneration:
             configuration.mediaSize = ImageProvider.defaultSize
         case .videoGeneration:
@@ -360,6 +362,71 @@ final class WorkflowStore {
         }
     }
 
+    /// 读取指定运行；尚未加载历史时会先从磁盘加载。
+    func storedRun(workflowID: UUID, runID: UUID) -> WorkflowRun? {
+        if let activeRun, activeRun.id == runID { return activeRun }
+        if let run = runsByWorkflowID[workflowID]?.first(where: { $0.id == runID }) { return run }
+        loadRuns(workflowID: workflowID)
+        return runsByWorkflowID[workflowID]?.first(where: { $0.id == runID })
+    }
+
+    /// 把补库子运行 ID 追加到父运行，同时保留当前活动运行。
+    func appendChildRun(_ childRunID: UUID, toParentWorkflowID workflowID: UUID, parentRunID: UUID) {
+        guard var parent = storedRun(workflowID: workflowID, runID: parentRunID) else { return }
+        if !parent.childRunIDs.contains(childRunID) { parent.childRunIDs.append(childRunID) }
+        let current = activeRun
+        saveRun(parent)
+        activeRun = current
+    }
+
+    /// 显示一个已持久化运行，不改变其磁盘状态。
+    func activateRun(_ run: WorkflowRun) {
+        activeRun = run
+    }
+
+    /// 取消等待补库的父运行。
+    func cancelWaitingRun(workflowID: UUID, runID: UUID) -> WorkflowRun? {
+        guard var run = storedRun(workflowID: workflowID, runID: runID), run.status == .waitingForKnowledge else { return nil }
+        run.status = .cancelled
+        run.endedAt = Date()
+        for index in run.nodeRuns.indices where [.pending, .waiting].contains(run.nodeRuns[index].status) {
+            run.nodeRuns[index].status = .cancelled
+            run.nodeRuns[index].message = "用户取消待补资料项目"
+            run.nodeRuns[index].endedAt = Date()
+        }
+        saveRun(run)
+        return run
+    }
+
+    /// 应用重启后把未正常结束的补库子运行标记失败；父运行继续等待资料。
+    func failInterruptedKnowledgeChildren(parentRunID: UUID) {
+        let workflowID = WorkflowDefinition.knowledgeImportWorkflowID
+        loadRuns(workflowID: workflowID)
+        let interrupted = (runsByWorkflowID[workflowID] ?? []).filter {
+            $0.parentRunID == parentRunID && $0.status == .running
+        }
+        guard !interrupted.isEmpty else { return }
+        let current = activeRun
+        for original in interrupted {
+            var run = original
+            run.status = .failed
+            run.endedAt = Date()
+            let warning = "应用重启前补库子运行未正常结束，请重试"
+            if !run.warnings.contains(warning) { run.warnings.append(warning) }
+            for index in run.nodeRuns.indices where [.pending, .running].contains(run.nodeRuns[index].status) {
+                run.nodeRuns[index].status = .failed
+                run.nodeRuns[index].message = warning
+                run.nodeRuns[index].endedAt = Date()
+            }
+            saveRun(run)
+        }
+        if let current, interrupted.contains(where: { $0.id == current.id }) {
+            activeRun = runsByWorkflowID[workflowID]?.first(where: { $0.id == current.id })
+        } else {
+            activeRun = current
+        }
+    }
+
     /// 删除一次运行及其媒体。
     func deleteRun(workflowID: UUID, runID: UUID) {
         let root = runRoot(workflowID: workflowID, runID: runID)
@@ -452,7 +519,7 @@ final class WorkflowStore {
     private func loadDefinitions() {
         let url = definitionsURL
         guard FileManager.default.fileExists(atPath: url.path) else {
-            workflows = [WorkflowDefinition.knowledgeImport(), WorkflowDefinition.starter()]
+            workflows = [WorkflowDefinition.vehicleInteriorAd(), WorkflowDefinition.knowledgeImport(), WorkflowDefinition.starter()]
             saveNow()
             return
         }
@@ -461,11 +528,18 @@ final class WorkflowStore {
             let file = try decoder.decode(WorkflowDefinitionsFile.self, from: data)
             workflows = file.workflows
             var needsSave = false
+            if !workflows.contains(where: { $0.id == WorkflowDefinition.vehicleInteriorAdWorkflowID }) {
+                workflows.insert(WorkflowDefinition.vehicleInteriorAd(), at: 0)
+                needsSave = true
+            }
             if !workflows.contains(where: { $0.id == WorkflowDefinition.knowledgeImportWorkflowID }) {
-                workflows.insert(WorkflowDefinition.knowledgeImport(), at: 0)
+                workflows.insert(WorkflowDefinition.knowledgeImport(), at: min(1, workflows.count))
                 needsSave = true
             }
             if normalizeBuiltInFlags() {
+                needsSave = true
+            }
+            if upgradeVehicleInteriorAdRuleLayerIfNeeded() {
                 needsSave = true
             }
             if upgradeKnowledgeImportInputsIfNeeded() {
@@ -474,8 +548,127 @@ final class WorkflowStore {
             if needsSave { saveNow() }
         } catch {
             lastError = error.localizedDescription
-            workflows = [WorkflowDefinition.knowledgeImport(), WorkflowDefinition.starter()]
+            workflows = [WorkflowDefinition.vehicleInteriorAd(), WorkflowDefinition.knowledgeImport(), WorkflowDefinition.starter()]
         }
+    }
+
+    /// 为旧版内置汽车广告工作流补齐通用创作规则检索层。
+    ///
+    /// 原有节点 ID 保持不变，仅更新内置提示词、补入规则节点和必要连线，
+    /// 使新建项目与已安装应用都使用同一套规则优先机制。
+    private func upgradeVehicleInteriorAdRuleLayerIfNeeded() -> Bool {
+        guard let workflowIndex = workflows.firstIndex(where: {
+            $0.id == WorkflowDefinition.vehicleInteriorAdWorkflowID
+        }) else { return false }
+
+        let desired = WorkflowDefinition.vehicleInteriorAd()
+        var workflow = workflows[workflowIndex]
+        var changed = false
+
+        let promptTemplates: [String: String] = [
+            "要素提取提示": WorkflowDefinition.vehicleInteriorAdExtractionPromptTemplate,
+            "全片规划提示": WorkflowDefinition.vehicleInteriorAdPlanningPromptTemplate,
+            "高推理审校提示": WorkflowDefinition.vehicleInteriorAdReviewPromptTemplate,
+        ]
+        for (title, template) in promptTemplates {
+            guard let nodeIndex = workflow.nodes.firstIndex(where: {
+                $0.kind == .promptTemplate && $0.displayTitle == title
+            }) else { continue }
+            if workflow.nodes[nodeIndex].configuration.text != template {
+                workflow.nodes[nodeIndex].configuration.text = template
+                changed = true
+            }
+        }
+
+        func desiredNode(kind: WorkflowNodeKind, title: String) -> WorkflowNode? {
+            desired.nodes.first { $0.kind == kind && $0.displayTitle == title }
+        }
+
+        let ruleQueryID: UUID
+        if let existing = workflow.nodes.first(where: {
+            $0.kind == .promptTemplate && $0.displayTitle == "创作规则检索提示"
+        }) {
+            ruleQueryID = existing.id
+            if let nodeIndex = workflow.nodes.firstIndex(where: { $0.id == existing.id }),
+               let templateNode = desiredNode(kind: .promptTemplate, title: "创作规则检索提示"),
+               workflow.nodes[nodeIndex].configuration != templateNode.configuration {
+                workflow.nodes[nodeIndex].configuration = templateNode.configuration
+                changed = true
+            }
+        } else if let node = desiredNode(kind: .promptTemplate, title: "创作规则检索提示") {
+            workflow.nodes.append(node)
+            ruleQueryID = node.id
+            changed = true
+        } else {
+            return false
+        }
+
+        let ruleSearchID: UUID
+        if let existing = workflow.nodes.first(where: {
+            $0.kind == .knowledgeSearch && $0.displayTitle == "创作规则检索"
+        }) {
+            ruleSearchID = existing.id
+            if let nodeIndex = workflow.nodes.firstIndex(where: { $0.id == existing.id }),
+               let templateNode = desiredNode(kind: .knowledgeSearch, title: "创作规则检索"),
+               workflow.nodes[nodeIndex].configuration != templateNode.configuration {
+                workflow.nodes[nodeIndex].configuration = templateNode.configuration
+                changed = true
+            }
+        } else if let node = desiredNode(kind: .knowledgeSearch, title: "创作规则检索") {
+            workflow.nodes.append(node)
+            ruleSearchID = node.id
+            changed = true
+        } else {
+            return false
+        }
+
+        guard let articleID = workflow.nodes.first(where: {
+            $0.kind == .runtimeInput && $0.configuration.parameterName == "广告文章"
+        })?.id,
+        let extractionPromptID = workflow.nodes.first(where: {
+            $0.kind == .promptTemplate && $0.displayTitle == "要素提取提示"
+        })?.id,
+        let planningPromptID = workflow.nodes.first(where: {
+            $0.kind == .promptTemplate && $0.displayTitle == "全片规划提示"
+        })?.id,
+        let reviewPromptID = workflow.nodes.first(where: {
+            $0.kind == .promptTemplate && $0.displayTitle == "高推理审校提示"
+        })?.id
+        else { return changed }
+
+        func ensureConnection(
+            sourceNodeID: UUID,
+            sourcePortID: String,
+            targetNodeID: UUID,
+            targetPortID: String
+        ) {
+            if workflow.connections.contains(where: {
+                $0.sourceNodeID == sourceNodeID && $0.sourcePortID == sourcePortID &&
+                $0.targetNodeID == targetNodeID && $0.targetPortID == targetPortID
+            }) { return }
+            workflow.connections.removeAll {
+                $0.targetNodeID == targetNodeID && $0.targetPortID == targetPortID
+            }
+            workflow.connections.append(WorkflowConnection(
+                sourceNodeID: sourceNodeID,
+                sourcePortID: sourcePortID,
+                targetNodeID: targetNodeID,
+                targetPortID: targetPortID
+            ))
+            changed = true
+        }
+
+        ensureConnection(sourceNodeID: articleID, sourcePortID: "text", targetNodeID: ruleQueryID, targetPortID: "article")
+        ensureConnection(sourceNodeID: ruleQueryID, sourcePortID: "text", targetNodeID: ruleSearchID, targetPortID: "query")
+        ensureConnection(sourceNodeID: ruleSearchID, sourcePortID: "context", targetNodeID: extractionPromptID, targetPortID: "rules")
+        ensureConnection(sourceNodeID: ruleSearchID, sourcePortID: "context", targetNodeID: planningPromptID, targetPortID: "rules")
+        ensureConnection(sourceNodeID: ruleSearchID, sourcePortID: "context", targetNodeID: reviewPromptID, targetPortID: "rules")
+
+        if changed {
+            workflow.updatedAt = Date()
+            workflows[workflowIndex] = workflow
+        }
+        return changed
     }
 
     /// 为旧版知识入库节点补上显式提示词、知识集合输入节点与连线，并保留原节点配置。
@@ -568,7 +761,10 @@ final class WorkflowStore {
     private func normalizeBuiltInFlags() -> Bool {
         var changed = false
         for index in workflows.indices {
-            let shouldBeBuiltIn = workflows[index].id == WorkflowDefinition.knowledgeImportWorkflowID
+            let shouldBeBuiltIn = [
+                WorkflowDefinition.knowledgeImportWorkflowID,
+                WorkflowDefinition.vehicleInteriorAdWorkflowID,
+            ].contains(workflows[index].id)
             if workflows[index].isBuiltIn != shouldBeBuiltIn {
                 workflows[index].isBuiltIn = shouldBeBuiltIn
                 changed = true

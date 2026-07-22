@@ -431,6 +431,8 @@ struct WorkflowRunPreflightSheet: View {
 
     @State private var values: [String: WorkflowValue]
     @State private var promptSelections: [UUID: UUID] = [:]
+    @State private var importedTextNames: [UUID: String] = [:]
+    @State private var extractionError: String?
 
     init(
         workflow: WorkflowDefinition,
@@ -553,18 +555,32 @@ struct WorkflowRunPreflightSheet: View {
                                             .font(.caption)
                                             .foregroundStyle(AppTheme.textTertiary)
                                     } else if node.configuration.runtimeInputType == .text {
+                                        HStack {
+                                            if let name = importedTextNames[node.id] {
+                                                Label(name, systemImage: "doc.text")
+                                                    .font(.caption)
+                                                    .foregroundStyle(AppTheme.textSecondary)
+                                                    .lineLimit(1)
+                                            }
+                                            Spacer()
+                                            Button("导入文章") { chooseTextFile(for: node) }
+                                                .help("支持 TXT、Markdown、RTF、含文本 PDF 和 DOCX；不执行 OCR")
+                                        }
                                         TextEditor(text: Binding(
                                             get: {
                                                 guard case .text(let text) = values[node.id.uuidString] else { return "" }
                                                 return text
                                             },
-                                            set: { values[node.id.uuidString] = .text($0) }
+                                            set: { values[node.id.uuidString] = .text(String($0.prefix(80_000))) }
                                         ))
                                         .font(.callout)
                                         .frame(minHeight: 74)
                                         .padding(5)
                                         .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 7))
                                         .overlay(RoundedRectangle(cornerRadius: 7).stroke(AppTheme.stroke))
+                                        Text("\(runtimeValue(for: node)?.payload.count ?? 0) / 80,000 字符")
+                                            .font(.caption2.monospacedDigit())
+                                            .foregroundStyle(AppTheme.textTertiary)
                                     } else {
                                         HStack {
                                             Image(systemName: mediaIcon(node.configuration.runtimeInputType))
@@ -620,6 +636,14 @@ struct WorkflowRunPreflightSheet: View {
             }
         }
         .frame(width: 620, height: 620)
+        .alert("文章导入失败", isPresented: Binding(
+            get: { extractionError != nil },
+            set: { if !$0 { extractionError = nil } }
+        )) {
+            Button("知道了", role: .cancel) { extractionError = nil }
+        } message: {
+            Text(extractionError ?? "无法读取文章")
+        }
     }
 
     private func costBadge(_ title: String, _ count: Int, _ icon: String) -> some View {
@@ -742,6 +766,28 @@ struct WorkflowRunPreflightSheet: View {
         case .audio: values[node.id.uuidString] = .audio(url.path)
         case .folder: values[node.id.uuidString] = .folder(url.path)
         }
+    }
+
+    private func chooseTextFile(for node: WorkflowNode) {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [
+            UTType.plainText,
+            UTType(filenameExtension: "md"),
+            UTType.rtf,
+            UTType.pdf,
+            UTType(filenameExtension: "docx"),
+        ].compactMap { $0 }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let result = TextExtractor.extractDetailed(from: url, maxCharacters: 80_000)
+        guard result.didExtractContent else {
+            extractionError = result.errorMessage ?? "文件没有可提取文本（不支持 OCR）"
+            return
+        }
+        values[node.id.uuidString] = .text(String(result.text.prefix(80_000)))
+        importedTextNames[node.id] = url.lastPathComponent
     }
 }
 
