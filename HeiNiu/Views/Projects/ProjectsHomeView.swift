@@ -352,9 +352,6 @@ private struct ProjectDetailView: View {
     let onRerun: () -> Void
     let onCancel: () -> Void
 
-    @State private var storyboard = ""
-    @State private var notes = ""
-
     private var project: ProjectRecord? { projectStore.project(id: projectID) }
     private var run: WorkflowRun? {
         guard workflowStore.activeRun?.id == project?.workflowRunID else { return nil }
@@ -378,7 +375,7 @@ private struct ProjectDetailView: View {
                         }
                     }
                     .padding(24)
-                    .frame(maxWidth: 980)
+                    .frame(maxWidth: 1180)
                     .frame(maxWidth: .infinity)
                 }
             } else {
@@ -391,10 +388,6 @@ private struct ProjectDetailView: View {
         }
         .background(AppTheme.bgBase)
         .navigationTitle(project?.status == .running ? "项目运行" : "分镜审核")
-        .onAppear(perform: loadReview)
-        .onChange(of: project?.status) { _, status in
-            if status == .awaitingReview || status == .approved { loadReview() }
-        }
     }
 
     private func detailHeader(_ project: ProjectRecord) -> some View {
@@ -445,55 +438,7 @@ private struct ProjectDetailView: View {
     }
 
     private func reviewContent(_ project: ProjectRecord) -> some View {
-        VStack(spacing: 18) {
-            StudioCard(
-                title: "分镜稿",
-                subtitle: project.storyboardDraft.isEmpty
-                    ? "工作流没有输出文本，请在这里补充分镜稿后审核。"
-                    : "检查并直接修改工作流生成的分镜内容。"
-            ) {
-                TextEditor(text: $storyboard)
-                    .font(.body.monospaced())
-                    .scrollContentBackground(.hidden)
-                    .frame(minHeight: 360)
-                    .padding(10)
-                    .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.stroke))
-            }
-
-            StudioCard(title: "审核意见", subtitle: "可选，记录修改说明或通过理由。") {
-                TextEditor(text: $notes)
-                    .frame(minHeight: 100)
-                    .scrollContentBackground(.hidden)
-                    .padding(8)
-                    .background(AppTheme.bgElevated, in: RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.stroke))
-            }
-
-            if !project.runWarnings.isEmpty {
-                StudioCard(title: "运行提醒") {
-                    ForEach(project.runWarnings, id: \.self) { warning in
-                        Label(warning, systemImage: "exclamationmark.triangle")
-                            .font(.callout)
-                            .foregroundStyle(.orange)
-                    }
-                }
-            }
-
-            HStack {
-                Button("重新运行", action: onRerun)
-                Spacer()
-                Button("保存修改") {
-                    projectStore.saveReview(projectID: projectID, storyboard: storyboard, notes: notes)
-                }
-                Button("审核通过") {
-                    projectStore.approve(projectID: projectID, storyboard: storyboard, notes: notes)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(AppTheme.success)
-                .disabled(storyboard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-        }
+        StoryboardReviewView(projectID: project.id, onRerun: onRerun)
     }
 
     private func failedContent(_ project: ProjectRecord) -> some View {
@@ -513,11 +458,6 @@ private struct ProjectDetailView: View {
         }
     }
 
-    private func loadReview() {
-        guard let project else { return }
-        storyboard = project.storyboardDraft
-        notes = project.reviewNotes
-    }
 }
 
 /// 新建项目表单，只选择项目名与要执行的全局工作流。

@@ -12,7 +12,7 @@ https://xiaobeiswift.github.io/HeiNiu/documentation/heiniu/
 ## 功能
 
 - 项目看板：卡片式展示项目，选择全局工作流并填写本次输入后运行
-- 分镜审核：工作流完成后自动进入审核页，可修改、填写意见并确认通过
+- 分镜审核：工作流完成后自动拆成单镜头卡片，可管理混合参考图、编辑提示词、生成/播放竖屏视频并确认通过
 - 全局知识库：集合、标签、文本文件、可预览的原始图片和手写笔记
 - 本地向量索引：支持标准 `/embeddings` 与豆包 `/embeddings/multimodal`
 - LLM 服务商：OpenAI 兼容与 Anthropic，支持模型列表及连接测试

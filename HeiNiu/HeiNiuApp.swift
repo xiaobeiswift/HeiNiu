@@ -27,6 +27,8 @@ struct HeiNiuApp: App {
     @State private var workflowStore = WorkflowStore()
     /// 全局项目卡片与分镜审核内容。
     @State private var projectStore = ProjectStore()
+    /// 项目分镜卡片发起的媒体生成任务。
+    @State private var projectMediaGenerator = ProjectMediaGenerator()
     /// PixMax 登录、心跳和登录框队列。
     @State private var pixmaxSessions = PixmaxSessionManager.shared
 
@@ -38,6 +40,7 @@ struct HeiNiuApp: App {
                 .environment(knowledgeStore)
                 .environment(workflowStore)
                 .environment(projectStore)
+                .environment(projectMediaGenerator)
                 .environment(pixmaxSessions)
                 .frame(minWidth: 1200, minHeight: 720)
                 .background(AppTheme.bgBase)

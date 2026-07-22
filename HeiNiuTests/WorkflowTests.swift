@@ -678,6 +678,8 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertTrue(store.synchronize(projectID: projectID, run: run, workflow: workflow))
         XCTAssertEqual(store.project(id: projectID)?.status, .awaitingReview)
         XCTAssertEqual(store.project(id: projectID)?.storyboardDraft, "镜头 1：人物推门进入。")
+        XCTAssertEqual(store.project(id: projectID)?.storyboardShots.count, 1)
+        XCTAssertEqual(store.project(id: projectID)?.storyboardShots.first?.prompt, "镜头 1：人物推门进入。")
 
         store.approve(projectID: projectID, storyboard: "镜头 1：人物推门进入。", notes: "节奏通过")
         XCTAssertFalse(store.synchronize(projectID: projectID, run: run, workflow: workflow))
@@ -704,7 +706,90 @@ final class ProjectStoreTests: XCTestCase {
         XCTAssertEqual(project.status, .failed)
         XCTAssertEqual(project.workflowName, "未知工作流")
         XCTAssertTrue(project.storyboardDraft.isEmpty)
+        XCTAssertTrue(project.storyboardShots.isEmpty)
         XCTAssertTrue(project.runWarnings.isEmpty)
+    }
+
+    @MainActor
+    func testStoryboardParserCreatesOrderedCardsAndIgnoresPreamble() {
+        let storyboard = """
+        以下为分镜方案：
+
+        镜头 1：雨夜街口
+        画面描述：女孩撑伞进入画面
+        预计 5 秒
+
+        镜头 2：便利店内
+        画面描述：女孩展示商品
+        预计 7 秒
+        """
+
+        let shots = ProjectStore.storyboardShots(from: storyboard)
+
+        XCTAssertEqual(shots.count, 2)
+        XCTAssertEqual(shots.map(\.order), [1, 2])
+        XCTAssertEqual(shots[0].title, "女孩撑伞进入画面")
+        XCTAssertEqual(shots[0].durationSeconds, 5)
+        XCTAssertEqual(shots[1].title, "女孩展示商品")
+        XCTAssertEqual(shots[1].durationSeconds, 7)
+        XCTAssertFalse(ProjectStore.storyboardText(from: shots).contains("以下为分镜方案"))
+    }
+
+    @MainActor
+    func testLegacyStoryboardMigratesToCardsAndPersistsMediaState() throws {
+        struct ProjectFileFixture: Encodable {
+            var formatVersion = 1
+            var projects: [ProjectRecord]
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeiNiuProjectMigrationTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        let projectID = UUID()
+        let project = ProjectRecord(
+            id: projectID,
+            name: "旧分镜项目",
+            workflowID: UUID(),
+            workflowName: "旧工作流",
+            workflowRunID: UUID(),
+            status: .awaitingReview,
+            storyboardDraft: "镜头 1：人物推门进入，预计 4 秒。"
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let encoded = try encoder.encode(ProjectFileFixture(projects: [project]))
+        var fileObject = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var projects = try XCTUnwrap(fileObject["projects"] as? [[String: Any]])
+        projects[0]["formatVersion"] = 1
+        fileObject["projects"] = projects
+        let legacyData = try JSONSerialization.data(withJSONObject: fileObject)
+        try legacyData.write(to: root.appendingPathComponent("project-board.json"), options: .atomic)
+
+        let store = ProjectStore(rootURL: root)
+        XCTAssertEqual(store.project(id: projectID)?.formatVersion, ProjectRecord.currentFormatVersion)
+        let shotID = try XCTUnwrap(store.project(id: projectID)?.storyboardShots.first?.id)
+        store.addReferenceImages(
+            projectID: projectID,
+            shotID: shotID,
+            relativePaths: ["Assets/reference.png"],
+            source: .imported
+        )
+        store.completeVideoGeneration(
+            projectID: projectID,
+            shotID: shotID,
+            relativePath: "Assets/video.mp4",
+            aspectRatio: "9:16",
+            durationSeconds: 8
+        )
+
+        let reloaded = ProjectStore(rootURL: root)
+        let reloadedShot = try XCTUnwrap(reloaded.project(id: projectID)?.storyboardShots.first)
+        XCTAssertEqual(reloadedShot.referenceImages.map(\.relativePath), ["Assets/reference.png"])
+        XCTAssertEqual(reloadedShot.videoRelativePath, "Assets/video.mp4")
+        XCTAssertEqual(reloadedShot.videoStatus, .succeeded)
+        XCTAssertEqual(reloadedShot.durationSeconds, 8)
     }
 }
 

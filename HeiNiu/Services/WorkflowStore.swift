@@ -400,6 +400,37 @@ final class WorkflowStore {
         }
     }
 
+    /// 解析项目镜头保存的运行内相对媒体路径。
+    func artifactURL(relativePath: String, workflowID: UUID, runID: UUID) -> URL? {
+        let clean = relativePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, !clean.hasPrefix("/"), !clean.contains("..") else { return nil }
+        let url = runRoot(workflowID: workflowID, runID: runID).appendingPathComponent(clean)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// 把用户选择的参考图片复制到指定运行的 `Assets/`，返回运行内相对路径。
+    func importProjectReferenceImages(
+        _ sourceURLs: [URL],
+        workflowID: UUID,
+        runID: UUID
+    ) throws -> [String] {
+        let assets = assetsDirectory(workflowID: workflowID, runID: runID)
+        try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+        var relativePaths: [String] = []
+        for source in sourceURLs.prefix(9) {
+            let accessing = source.startAccessingSecurityScopedResource()
+            defer { if accessing { source.stopAccessingSecurityScopedResource() } }
+            let ext = source.pathExtension.isEmpty ? "png" : source.pathExtension.lowercased()
+            let target = assets.appendingPathComponent(
+                "project-reference-\(UUID().uuidString).\(ext)",
+                isDirectory: false
+            )
+            try FileManager.default.copyItem(at: source, to: target)
+            relativePaths.append("Assets/\(target.lastPathComponent)")
+        }
+        return relativePaths
+    }
+
     // MARK: - Persistence
 
     /// 立即保存工作流定义。
