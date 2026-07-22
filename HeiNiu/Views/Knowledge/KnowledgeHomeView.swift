@@ -116,7 +116,7 @@ struct KnowledgeHomeView: View {
             Button {
                 importFiles()
             } label: {
-                Label("导入文件", systemImage: "square.and.arrow.down")
+                Label("导入文件或图片", systemImage: "square.and.arrow.down")
             }
             Button {
                 showNoteSheet = true
@@ -232,14 +232,14 @@ struct KnowledgeHomeView: View {
             if filteredDocuments.isEmpty {
                 EmptyStateView(
                     title: "没有资料",
-                    message: "导入文件或新建一条笔记。",
+                    message: "导入文件、图片或新建一条笔记。",
                     systemImage: "doc.text.magnifyingglass"
                 )
             } else {
                 List(filteredDocuments, selection: $selectedDocumentID) { document in
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
-                            Image(systemName: document.sourceKind == .note ? "note.text" : "doc")
+                            Image(systemName: document.sourceKind == .note ? "note.text" : (isImageDocument(document) ? "photo" : "doc"))
                                 .foregroundStyle(AppTheme.accent)
                             Text(document.title).font(.callout.weight(.medium)).lineLimit(1)
                             Spacer()
@@ -293,7 +293,7 @@ struct KnowledgeHomeView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.allowedContentTypes = [
-            .plainText, .json, .commaSeparatedText, .pdf, .rtf,
+            .plainText, .json, .commaSeparatedText, .pdf, .rtf, .image,
             UTType(filenameExtension: "md") ?? .plainText,
             UTType(filenameExtension: "srt") ?? .plainText,
             UTType(filenameExtension: "vtt") ?? .plainText,
@@ -406,6 +406,16 @@ private struct KnowledgeDocumentDetail: View {
                     if let error = document.indexError, !error.isEmpty {
                         Text(error).font(.caption).foregroundStyle(.red)
                     }
+                    if let image = originalImage {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(maxWidth: .infinity, maxHeight: 360)
+                            .padding(10)
+                            .background(AppTheme.bgCard, in: RoundedRectangle(cornerRadius: 10))
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.stroke))
+                            .accessibilityLabel("原始图片预览")
+                    }
                     TextEditor(text: $content)
                         .font(.body)
                         .scrollContentBackground(.hidden)
@@ -417,6 +427,13 @@ private struct KnowledgeDocumentDetail: View {
                 .padding(20)
             }
         }
+    }
+
+    private var originalImage: NSImage? {
+        guard isImageDocument(document),
+              let file = store.originalFileURL(for: document)
+        else { return nil }
+        return NSImage(contentsOf: file)
     }
 
     private func save(reindexIfContentChanged: Bool = true) {
@@ -437,6 +454,14 @@ private struct KnowledgeDocumentDetail: View {
             }
         }
     }
+}
+
+/// 判断知识资料的原文件是否为图片。
+private func isImageDocument(_ document: KnowledgeDocument) -> Bool {
+    guard let sourceFileName = document.sourceFileName,
+          let type = UTType(filenameExtension: URL(fileURLWithPath: sourceFileName).pathExtension)
+    else { return false }
+    return type.conforms(to: .image)
 }
 
 private struct CollectionEditorSheet: View {

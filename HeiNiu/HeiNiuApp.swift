@@ -11,6 +11,7 @@ import SwiftUI
 /// - ``SettingsStore``：服务商、提示词与备份等配置
 /// - ``KnowledgeStore``：全局知识库、向量索引与检索
 /// - ``WorkflowStore``：全局节点工作流与运行历史
+/// - ``ProjectStore``：项目卡片与分镜审核状态
 ///
 /// 主界面为 ``MainView``，默认窗口约 1440×860。
 /// HeiNiuApp
@@ -24,6 +25,8 @@ struct HeiNiuApp: App {
     @State private var knowledgeStore = KnowledgeStore()
     /// 全局节点工作流与运行历史。
     @State private var workflowStore = WorkflowStore()
+    /// 全局项目卡片与分镜审核内容。
+    @State private var projectStore = ProjectStore()
     /// PixMax 登录、心跳和登录框队列。
     @State private var pixmaxSessions = PixmaxSessionManager.shared
 
@@ -34,6 +37,7 @@ struct HeiNiuApp: App {
                 .environment(settings)
                 .environment(knowledgeStore)
                 .environment(workflowStore)
+                .environment(projectStore)
                 .environment(pixmaxSessions)
                 .frame(minWidth: 1200, minHeight: 720)
                 .background(AppTheme.bgBase)

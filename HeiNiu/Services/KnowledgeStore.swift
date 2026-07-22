@@ -219,7 +219,19 @@ final class KnowledgeStore {
                 continue
             }
             let content = extraction.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let checksum = Self.sha256(content)
+            let checksum: String
+            if extraction.mime.hasPrefix("image/") {
+                do {
+                    var checksumData = Data("direct-image\u{0}".utf8)
+                    checksumData.append(try Data(contentsOf: url, options: .mappedIfSafe))
+                    checksum = Self.sha256(checksumData)
+                } catch {
+                    summary.failures.append("\(url.lastPathComponent)：无法读取图片数据")
+                    continue
+                }
+            } else {
+                checksum = Self.sha256(content)
+            }
             if documents.contains(where: { $0.sourceKind == .file && $0.checksum == checksum }) {
                 summary.skippedDuplicates += 1
                 continue

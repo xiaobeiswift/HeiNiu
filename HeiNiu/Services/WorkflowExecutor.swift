@@ -94,7 +94,8 @@ final class WorkflowExecutor {
         self.executionHook = executionHook
     }
 
-    /// 开始整图或目标节点运行。
+    /// 开始整图或目标节点运行并返回本次运行 ID；校验失败时返回 `nil`。
+    @discardableResult
     func start(
         workflow: WorkflowDefinition,
         targetNodeID: UUID?,
@@ -102,8 +103,8 @@ final class WorkflowExecutor {
         settings: SettingsStore,
         knowledge: any WorkflowKnowledgeAccessing,
         store: WorkflowStore
-    ) {
-        guard !isRunning else { return }
+    ) -> UUID? {
+        guard !isRunning else { return nil }
         let validationWorkflow = WorkflowGraphAnalysis.scopedWorkflow(targetNodeID: targetNodeID, in: workflow)
         var issues = WorkflowValidator.validate(validationWorkflow, settings: settings, registry: registry)
         let relevant = relevantNodeIDs(targetNodeID: targetNodeID, workflow: workflow)
@@ -121,14 +122,16 @@ final class WorkflowExecutor {
         validationIssues = issues
         guard !issues.contains(where: { $0.severity == .error }) else {
             statusMessage = "请先修复 \(issues.filter { $0.severity == .error }.count) 个问题"
-            return
+            return nil
         }
 
+        let runID = UUID()
         isRunning = true
         statusMessage = targetNodeID == nil ? "正在运行工作流" : "正在运行选中节点"
         runTask = Task { [weak self] in
             guard let self else { return }
             await self.performRun(
+                runID: runID,
                 workflow: workflow,
                 targetNodeID: targetNodeID,
                 runtimeInputs: runtimeInputs,
@@ -137,6 +140,7 @@ final class WorkflowExecutor {
                 store: store
             )
         }
+        return runID
     }
 
     /// 停止本地执行与媒体轮询。
@@ -163,6 +167,7 @@ final class WorkflowExecutor {
     }
 
     private func performRun(
+        runID: UUID,
         workflow: WorkflowDefinition,
         targetNodeID: UUID?,
         runtimeInputs: [String: WorkflowValue],
@@ -172,6 +177,7 @@ final class WorkflowExecutor {
     ) async {
         let relevant = relevantNodeIDs(targetNodeID: targetNodeID, workflow: workflow)
         var run = WorkflowRun(
+            id: runID,
             workflowID: workflow.id,
             targetNodeID: targetNodeID,
             runtimeInputs: runtimeInputs,

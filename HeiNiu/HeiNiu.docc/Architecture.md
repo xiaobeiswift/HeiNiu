@@ -7,23 +7,24 @@
 ```text
 HeiNiuApp
   └─ MainView（侧栏导航）
-       ├─ 工作台：知识库 / 工作流 / 剧本 / 分镜
+       ├─ 工作台：项目 / 知识库 / 工作流
        └─ 配置：设置
 ```
 
 ### 状态与依赖注入
 
-应用入口创建三个 `@Observable` 主仓库并通过 `.environment` 注入：
+应用入口创建四个 `@Observable` 主仓库并通过 `.environment` 注入：
 
 - ``SettingsStore``：LLM、生图、生视频服务商、提示词库与备份
 - ``KnowledgeStore``：知识集合、资料、索引、检索与独立归档
 - ``WorkflowStore``：全局工作流定义、自动保存与完整运行历史
+- ``ProjectStore``：项目卡片、运行关联、分镜草稿与审核状态
 
 视图通过仓库访问状态，不直接维护持久化格式。
 
 ### 知识索引链
 
-1. 导入器抽取 TXT/Markdown/JSON/CSV/字幕、PDF、RTF 或 DOCX 正文，原文件复制到应用数据目录
+1. 导入器抽取 TXT/Markdown/JSON/CSV/字幕、PDF、RTF 或 DOCX 正文；JPG、PNG、HEIC 等图片可直接作为原始视觉资料保存并生成可编辑说明，但不执行 OCR。原文件统一复制到应用数据目录
 2. 正文按约 1,000 字符、150 字符重叠切块
 3. ``OpenAIEmbeddingClient`` 以每批最多 32 个片段调用标准 `/embeddings`；豆包多模态模式按顺序调用 `/embeddings/multimodal`
 4. SQLite 在本机保存 Float32 向量、分块正文和索引状态
@@ -37,10 +38,18 @@ HeiNiuApp
 
 媒体协议通过 ``ImageGenerationAdapter``、``VideoGenerationAdapter`` 和 ``MediaAdapterRegistry`` 在源码内注册。新增协议只扩展适配器及能力描述，不改变画布节点或调度器。
 
+### 项目审核链
+
+1. 新建项目时填写项目名并选择一份全局工作流模板
+2. 进入工作流运行输入页，填写文本并选择本次需要的图片、视频、音频、文件夹、提示词或知识集合
+3. 确认运行后，项目立即绑定执行器分配的运行 ID
+4. 工作流成功后从结果输出节点提取文本，保存为项目分镜草稿
+5. 界面自动进入分镜审核页；用户可修改草稿、保存意见并标记审核通过
+
 ## 设计原则
 
 - **密钥与配置分离**：配置进 `settings.json`，Key 进 Keychain
 - **容错解码**：新增模型字段使用 `decodeIfPresent` 默认值
 - **资料独立**：知识库不依赖项目、聊天会话或智能体
-- **工作流独立**：工作流是全局模板，不引入项目层或资产库
+- **模板独立**：项目引用全局工作流模板与运行记录，不复制定义或媒体
 - **中文 UI**：产品文案与文档注释均使用中文

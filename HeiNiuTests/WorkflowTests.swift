@@ -4,6 +4,24 @@ import XCTest
 
 final class WorkflowModelTests: XCTestCase {
     @MainActor
+    func testImageExtractionCreatesImportableKnowledgeDescription() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("character-reference-\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try Data([0xFF, 0xD8, 0xFF, 0xD9]).write(to: url)
+
+        let result = TextExtractor.extractDetailed(from: url)
+
+        XCTAssertTrue(result.didExtractContent)
+        XCTAssertNil(result.errorMessage)
+        XCTAssertTrue(result.mime.hasPrefix("image/"))
+        XCTAssertTrue(result.text.contains("# 图片资料"))
+        XCTAssertTrue(result.text.contains(url.lastPathComponent))
+        XCTAssertTrue(result.text.contains("原始视觉参考图片"))
+        XCTAssertTrue(result.text.contains("未对图片执行 OCR"))
+    }
+
+    @MainActor
     func testDefinitionRoundTripAndTolerantDefaults() throws {
         let original = WorkflowDefinition.starter(named: "往返测试")
         let encoder = JSONEncoder()
@@ -204,9 +222,14 @@ final class WorkflowModelTests: XCTestCase {
                 $0.category == .knowledgeImport && $0.name == DefaultPrompts.vehicleKnowledgeImportPromptName
             }
         )
+        let characterPrompt = try XCTUnwrap(
+            DefaultPrompts.seedItems().first {
+                $0.category == .knowledgeImport && $0.name == DefaultPrompts.characterKnowledgeImportPromptName
+            }
+        )
         XCTAssertEqual(
             DefaultPrompts.seedItems().filter { $0.category == .knowledgeImport }.count,
-            2
+            3
         )
         XCTAssertTrue(productPrompt.isBuiltIn)
         XCTAssertTrue(productPrompt.template.contains("{{filename}}"))
@@ -216,6 +239,16 @@ final class WorkflowModelTests: XCTestCase {
         XCTAssertTrue(vehiclePrompt.template.contains("{{filename}}"))
         XCTAssertTrue(vehiclePrompt.template.contains("{{requirements}}"))
         XCTAssertTrue(vehiclePrompt.template.contains("汽车知识库资料整理员"))
+        XCTAssertTrue(characterPrompt.isBuiltIn)
+        XCTAssertTrue(characterPrompt.template.contains("{{filename}}"))
+        XCTAssertTrue(characterPrompt.template.contains("{{requirements}}"))
+        XCTAssertTrue(characterPrompt.template.contains("人物参考图知识库资料整理员"))
+        XCTAssertTrue(characterPrompt.template.contains("稳定外观锚点"))
+        XCTAssertTrue(characterPrompt.template.contains("连续性约束"))
+        XCTAssertTrue(characterPrompt.template.contains("不得单独证明人物真实姓名"))
+        XCTAssertTrue(characterPrompt.template.contains("固定选角"))
+        XCTAssertTrue(characterPrompt.template.contains("角色映射与调用规则"))
+        XCTAssertTrue(characterPrompt.template.contains("临时姓名不得覆盖"))
         XCTAssertTrue(DefaultPrompts.blankTemplate(for: .knowledgeImport).contains("{{filename}}"))
 
         let settings = SettingsStore()
@@ -617,6 +650,64 @@ final class WorkflowGraphAndStoreTests: XCTestCase {
     }
 }
 
+final class ProjectStoreTests: XCTestCase {
+    @MainActor
+    func testProjectRunCreatesStoryboardReviewAndPersistsApproval() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HeiNiuProjectTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let workflow = WorkflowDefinition.starter(named: "项目分镜工作流")
+        let outputID = try XCTUnwrap(workflow.nodes.first { $0.kind == .output }?.id)
+        let store = ProjectStore(rootURL: root)
+        let projectID = store.createProject(name: "反转短剧", workflow: workflow)
+
+        var run = WorkflowRun(
+            workflowID: workflow.id,
+            targetNodeID: nil,
+            runtimeInputs: [:],
+            nodes: workflow.nodes
+        )
+        store.bindRun(projectID: projectID, runID: run.id)
+        let outputIndex = try XCTUnwrap(run.nodeRuns.firstIndex { $0.nodeID == outputID })
+        run.nodeRuns[outputIndex].status = .succeeded
+        run.nodeRuns[outputIndex].outputs = ["value": .text("镜头 1：人物推门进入。")]
+        run.status = .succeeded
+        run.endedAt = Date()
+
+        XCTAssertTrue(store.synchronize(projectID: projectID, run: run, workflow: workflow))
+        XCTAssertEqual(store.project(id: projectID)?.status, .awaitingReview)
+        XCTAssertEqual(store.project(id: projectID)?.storyboardDraft, "镜头 1：人物推门进入。")
+
+        store.approve(projectID: projectID, storyboard: "镜头 1：人物推门进入。", notes: "节奏通过")
+        XCTAssertFalse(store.synchronize(projectID: projectID, run: run, workflow: workflow))
+        XCTAssertEqual(store.project(id: projectID)?.status, .approved)
+
+        let reloaded = ProjectStore(rootURL: root)
+        XCTAssertEqual(reloaded.project(id: projectID)?.name, "反转短剧")
+        XCTAssertEqual(reloaded.project(id: projectID)?.workflowRunID, run.id)
+        XCTAssertEqual(reloaded.project(id: projectID)?.status, .approved)
+        XCTAssertEqual(reloaded.project(id: projectID)?.reviewNotes, "节奏通过")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("project-board.json").path
+        ))
+    }
+
+    @MainActor
+    func testProjectDecodingIsTolerantAndUnknownStatusFailsSafely() throws {
+        let project = try JSONDecoder().decode(
+            ProjectRecord.self,
+            from: Data(#"{"name":"旧项目","status":"future-status"}"#.utf8)
+        )
+        XCTAssertEqual(project.formatVersion, ProjectRecord.currentFormatVersion)
+        XCTAssertEqual(project.name, "旧项目")
+        XCTAssertEqual(project.status, .failed)
+        XCTAssertEqual(project.workflowName, "未知工作流")
+        XCTAssertTrue(project.storyboardDraft.isEmpty)
+        XCTAssertTrue(project.runWarnings.isEmpty)
+    }
+}
+
 final class WorkflowExecutorTests: XCTestCase {
     @MainActor
     func testFolderRuntimeInputCopiesDirectoryIntoRunAssets() async throws {
@@ -643,16 +734,17 @@ final class WorkflowExecutorTests: XCTestCase {
             ]
         )
 
-        executor.start(
+        let runID = try XCTUnwrap(executor.start(
             workflow: workflow,
             targetNodeID: nil,
             runtimeInputs: [input.id.uuidString: .folder(source.path)],
             settings: SettingsStore(),
             knowledge: StubKnowledgeSearch(),
             store: store
-        )
+        ))
         try await waitUntilFinished(executor)
 
+        XCTAssertEqual(store.activeRun?.id, runID)
         XCTAssertEqual(store.activeRun?.status, .succeeded)
         let value = try XCTUnwrap(store.activeRun?.nodeRun(id: output.id)?.outputs["value"])
         guard case .folder = value else { return XCTFail("结果应保留文件夹类型") }

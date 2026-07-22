@@ -419,13 +419,14 @@ private struct WorkflowRunRequest: Identifiable {
 
 // MARK: - Preflight
 
-private struct WorkflowRunPreflightSheet: View {
+struct WorkflowRunPreflightSheet: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(SettingsStore.self) private var settings
     @Environment(KnowledgeStore.self) private var knowledge
 
     let workflow: WorkflowDefinition
     let targetNodeID: UUID?
+    let onBack: (() -> Void)?
     let onRun: ([String: WorkflowValue]) -> Void
 
     @State private var values: [String: WorkflowValue]
@@ -434,10 +435,12 @@ private struct WorkflowRunPreflightSheet: View {
     init(
         workflow: WorkflowDefinition,
         targetNodeID: UUID?,
+        onBack: (() -> Void)? = nil,
         onRun: @escaping ([String: WorkflowValue]) -> Void
     ) {
         self.workflow = workflow
         self.targetNodeID = targetNodeID
+        self.onBack = onBack
         self.onRun = onRun
         let relevant = WorkflowGraphAnalysis.upstreamClosure(targetNodeID: targetNodeID, in: workflow)
         let ids = targetNodeID == nil ? Set(workflow.nodes.map(\.id)) : relevant
@@ -493,6 +496,9 @@ private struct WorkflowRunPreflightSheet: View {
                     Text(workflow.name).foregroundStyle(AppTheme.textSecondary)
                 }
                 Spacer()
+                if let onBack {
+                    Button("上一步", action: onBack)
+                }
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("开始运行") {
                     onRun(valuesWithPromptInputs())

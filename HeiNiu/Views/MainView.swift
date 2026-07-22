@@ -7,12 +7,10 @@ import SwiftUI
 
 /// 侧栏一级模块。
 enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
+    /// 项目卡片与分镜审核。
+    case projects
     /// 节点式工作流。
     case workflows
-    /// 剧本。
-    case scripts
-    /// 分镜。
-    case storyboards
     /// 知识库。
     case knowledge
     /// 设置。
@@ -24,9 +22,8 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     /// 标题。
     var title: String {
         switch self {
+        case .projects: "项目"
         case .workflows: "工作流"
-        case .scripts: "剧本"
-        case .storyboards: "分镜"
         case .knowledge: "知识库"
         case .settings: "设置"
         }
@@ -35,23 +32,22 @@ enum SidebarItem: String, CaseIterable, Identifiable, Hashable {
     /// 用于 UI 的 SF Symbol。
     var systemImage: String {
         switch self {
+        case .projects: "square.grid.2x2"
         case .workflows: "point.3.connected.trianglepath.dotted"
-        case .scripts: "doc.text"
-        case .storyboards: "rectangle.split.3x1"
         case .knowledge: "books.vertical"
         case .settings: "gearshape"
         }
     }
 
     /// 工作台模块。
-    static let workspaceItems: [SidebarItem] = [.knowledge, .workflows, .scripts, .storyboards]
+    static let workspaceItems: [SidebarItem] = [.projects, .knowledge, .workflows]
 }
 
 /// 主窗口：工作台导航与详情。
 struct MainView: View {
     @Environment(SettingsStore.self) private var settings
     @Environment(PixmaxSessionManager.self) private var pixmaxSessions
-    @State private var selection: SidebarItem? = .knowledge
+    @State private var selection: SidebarItem? = .projects
 
     /// 导航标题。
     private var currentTitle: String {
@@ -159,28 +155,16 @@ struct MainView: View {
     @ViewBuilder
     private var detailView: some View {
         switch selection {
+        case .projects:
+            ProjectsHomeView()
         case .workflows:
             WorkflowHomeView()
-        case .scripts:
-            PlaceholderView(
-                title: "剧本",
-                systemImage: "doc.text",
-                message: "根据简报或源文本生成短剧剧本。",
-                badge: "即将推出"
-            )
-        case .storyboards:
-            PlaceholderView(
-                title: "分镜",
-                systemImage: "rectangle.split.3x1",
-                message: "将剧本拆成镜头，并生成视频提示词。",
-                badge: "即将推出"
-            )
         case .knowledge:
             KnowledgeHomeView()
         case .settings:
             SettingsView()
         case .none:
-            KnowledgeHomeView()
+            ProjectsHomeView()
         }
     }
 }
@@ -190,6 +174,7 @@ struct MainView: View {
         .environment(SettingsStore())
         .environment(KnowledgeStore())
         .environment(WorkflowStore())
+        .environment(ProjectStore())
         .environment(PixmaxSessionManager.shared)
         .frame(width: 1180, height: 760)
 }

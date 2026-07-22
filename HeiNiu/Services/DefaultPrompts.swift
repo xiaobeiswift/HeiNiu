@@ -15,6 +15,9 @@ enum DefaultPrompts {
     /// 汽车图片知识整理提示词的名称。
     static let vehicleKnowledgeImportPromptName = "汽车图片知识整理"
 
+    /// 人物参考图片知识整理提示词的名称。
+    static let characterKnowledgeImportPromptName = "人物图片知识整理"
+
     /// “添加知识库”节点默认跟随的内置提示词名称。
     static let knowledgeImportPromptName = productKnowledgeImportPromptName
 
@@ -143,6 +146,68 @@ enum DefaultPrompts {
     - scene：画面场景
     - description：客观说明图片实际展示什么
     - authority：official_brand/authorized_channel/user_provided_real/third_party/synthetic_non_authoritative/unknown
+    - evidence_scope：本图能直接证明或辅助核对什么
+    - tags：适合用文字检索本图的关键词
+    """
+
+    /// 人物参考图片知识整理提示词；入库节点会逐图替换文件名和本次要求。
+    static let characterKnowledgeImportPromptTemplate = """
+    你是一名严谨的人物参考图知识库资料整理员。当前只处理一张人物图片，请把图中可确认的人物身份线索、稳定外观锚点、当前造型和连续性约束整理成一条能脱离原图独立理解、适合语义检索和后续图像/视频创作复用的中文知识资料。
+
+    当前文件名：
+    {{filename}}
+
+    用户整理要求与已知资料：
+    {{requirements}}
+
+    整理规则：
+    1. 先判断画面是单人参考图、同一人物多视图、多人合照，还是包含背景人物。版式清楚的正面、侧面、背面和近景应合并为同一人物资料，不得误当成多人；无法确认是否同一人时写入待确认项。
+    2. 姓名、角色关系、职业、身高和其他设定，只有在图片文字清晰可见或用户整理要求明确提供时才能记录。文件名可作为检索线索，但不得单独证明人物真实姓名。
+    3. 稳定人物锚点优先记录脸型轮廓、眉形、眼型、鼻部轮廓、唇形、发色、发型、发长、明显且非敏感的可见特征，以及有依据的身高与整体体态。使用中性、客观、可复现的描述。
+    4. 将人物本体与当前造型分开记录。服装、鞋履、首饰、眼镜、包袋、妆容、姿势和表情默认属于本图造型或状态，不得擅自写成永久身份特征。
+    5. 只描述可见外观，不根据面貌推断或识别真人身份、精确年龄、民族/种族、国籍、健康状况、宗教、性取向、政治立场、社会阶层或性格。不得判断人物“像某位明星”。
+    6. 身高只有标尺、清晰文字或用户资料支持时才能写具体数值；不得凭图片估算体重、三围或精确身体尺寸。透视、姿势和鞋底高度造成的差异要保守处理。
+    7. 看不清的服装文字、图案、饰品和细节不得猜测；部分可见时写“疑似……，待确认”。不得编造品牌、材质、价格或商品型号。
+    8. 连续性约束应区分“必须保持”和“可随剧情变化”：脸部结构、发色等稳定身份锚点通常必须保持；衣着、动作、表情和场景只有在用户指定为固定设定时才锁定。
+    9. 用户明确提供的固定选角、角色功能、座位、人物关系、别名映射和适用场景属于强约束，必须单独写入“角色映射与调用规则”。文案中的临时姓名不得覆盖用户指定的视觉人物身份。
+    10. 多人图片必须分别编号并描述，禁止把甲的脸、乙的服装和丙的身高合并成一个人物。用户指定目标人物时，其他人只作为画面关系或背景记录。
+    11. 只有用户明确说明来源时才能标记 official_character_design、authorized_reference 或 user_provided_reference；无法确认来源时使用 unknown。AI 生成或合成参考图使用 synthetic_reference，不能作为真人身份或现实经历的证据。
+    12. 用户整理要求与图片冲突时，以图片可见内容为准，并把冲突写入待确认项；图片无法确认的用户资料可标注为“用户提供，未由本图验证”。
+    13. 没有可靠内容的章节直接省略，不要填空，也不要输出详细推理过程。
+
+    请在系统要求的 JSON 对象中输出：
+    - title：使用“人物名或角色称谓 + 参考图类型/造型”组成简洁标题；身份未知时使用文件名中的可靠信息。
+    - content：使用 Markdown，按实际证据选择以下章节：
+      ## 人物身份
+      ## 图片内容
+      ## 可确认知识
+      ## 稳定外观锚点
+      ## 身高与体态
+      ## 当前服装与配饰
+      ## 表情、动作与机位
+      ## 角色映射与调用规则
+      ## 连续性约束
+      ## 图片索引
+      ## 来源与适用范围
+      ## 待确认
+    - tags：优先包含人物名、角色关系、用户指定的别名与角色功能、身高、发型、发色、服装主色、造型、动作、表情、机位和场景；不得添加图片中不存在且用户未提供的内容。
+
+    “连续性约束”应明确列出：
+    - 必须保持：有依据的稳定身份锚点，以及用户明确要求固定的特征
+    - 当前造型：本图服装、配饰、发型状态和妆容，仅在复现本造型时保持
+    - 可变化：剧情允许变化的服装、动作、表情、机位、光线和场景
+    - 禁止混淆：与同组其他人物区分时最重要的 2 至 5 个特征；没有对照人物时可省略
+
+    “图片索引”至少写明：
+    - image_id：基于文件名生成稳定、简洁的标识
+    - filename：原样保留 {{filename}}
+    - character_name_or_role：可确认的人物名或角色称谓，未知则写待确认
+    - image_type：单人全身/半身/近景/头像/同一人物多视图/多人合照/动作参考或其他
+    - subject：画面目标人物
+    - viewpoint：正面/背面/左侧面/右侧面/三分之二侧面/近景或其他客观机位
+    - outfit_summary：当前造型的简短客观概括
+    - expression_or_action：可见表情或动作
+    - authority：official_character_design/authorized_reference/user_provided_reference/synthetic_reference/unknown
     - evidence_scope：本图能直接证明或辅助核对什么
     - tags：适合用文字检索本图的关键词
     """
@@ -417,6 +482,7 @@ enum DefaultPrompts {
         // MARK: 知识库添加
         add(.knowledgeImport, productKnowledgeImportPromptName, productKnowledgeImportPromptTemplate)
         add(.knowledgeImport, vehicleKnowledgeImportPromptName, vehicleKnowledgeImportPromptTemplate)
+        add(.knowledgeImport, characterKnowledgeImportPromptName, characterKnowledgeImportPromptTemplate)
 
         return items
     }

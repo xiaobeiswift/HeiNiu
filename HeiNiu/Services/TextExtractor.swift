@@ -125,8 +125,17 @@ enum TextExtractor {
             }
         }
         if type?.conforms(to: .image) == true {
-            let note = "【图片：\(name)。当前以文本输入为主，请补充画面描述。】"
-            return Result(text: note, byteSize: size, mime: mime, didExtractContent: false, errorMessage: "图片暂不 OCR")
+            let note = """
+            # 图片资料
+
+            - 原始文件：\(name)
+            - 媒体类型：\(mime)
+            - 文件大小：\(size) 字节
+            - 资料用途：原始视觉参考图片
+
+            图片原文件已保留在知识库中。当前未对图片执行 OCR 或视觉内容推断；请在本条正文中补充可检索的图片说明，或同时导入配套人物、产品、场景资料。
+            """
+            return Result(text: note, byteSize: size, mime: mime, didExtractContent: true, errorMessage: nil)
         }
 
         if let raw = readText(from: standardized), isMostlyPrintable(raw) {

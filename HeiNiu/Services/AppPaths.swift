@@ -54,6 +54,16 @@ enum AppPaths {
         workflowsRoot.appendingPathComponent("Runs", isDirectory: true)
     }
 
+    /// 项目卡片与分镜审核数据根目录。
+    static var projectsRoot: URL {
+        applicationSupportRoot.appendingPathComponent("Projects", isDirectory: true)
+    }
+
+    /// 当前项目看板文件；与历史根目录 `projects.json` 区分。
+    static var projectBoardURL: URL {
+        projectsRoot.appendingPathComponent("project-board.json", isDirectory: false)
+    }
+
     /// 指定工作流的一次运行目录。
     static func workflowRunRoot(workflowID: UUID, runID: UUID) -> URL {
         workflowRunsRoot
@@ -76,6 +86,7 @@ enum AppPaths {
             knowledgeFilesRoot,
             workflowsRoot,
             workflowRunsRoot,
+            projectsRoot,
         ] {
             if !fm.fileExists(atPath: url.path) {
                 try? fm.createDirectory(at: url, withIntermediateDirectories: true)
